@@ -1,0 +1,13 @@
+[mysqld]
+server-id=2
+relay-log=relay-bin
+gtid-mode=ON
+enforce-gtid-consistency=ON
+
+# 只读：故意用 super-read-only，防止实验时手滑直接在从库写坏数据
+read-only=ON
+super-read-only=ON
+
+slow_query_log=ON
+slow_query_log_file=/var/lib/mysql/slow.log
+long_query_time=1

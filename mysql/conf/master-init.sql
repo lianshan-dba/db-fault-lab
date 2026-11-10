@@ -1,0 +1,33 @@
+-- 复制账号。故意用 mysql_native_password，省掉 caching_sha2 在无 SSL 复制时的
+-- GET_SOURCE_PUBLIC_KEY 麻烦（真实生产里建议用 SSL + caching_sha2，这里只为实验省事）
+CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY 'replpass';
+GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+
+CREATE DATABASE IF NOT EXISTS demo;
+USE demo;
+
+-- 实验用的表：有主键的、没主键的、宽表，各来一个
+CREATE TABLE IF NOT EXISTS t_pk (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uid BIGINT UNSIGNED NOT NULL,
+  amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_uid (uid)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS t_nopk (
+  uid BIGINT UNSIGNED NOT NULL,
+  status TINYINT NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+SET SESSION cte_max_recursion_depth = 200000;
+
+INSERT INTO t_pk (uid, amount)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 100000)
+SELECT n % 5000, ROUND(RAND()*1000, 2) FROM seq;
+
+INSERT INTO t_nopk (uid, status)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 100000)
+SELECT n % 5000, n % 3 FROM seq;
