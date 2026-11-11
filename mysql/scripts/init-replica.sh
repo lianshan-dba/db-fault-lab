@@ -27,6 +27,16 @@ for slave in mysql-slave-1 mysql-slave-2; do
     | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_Error|Last_IO_Error' || true
 done
 
+# 复制建好之后再上锁：配置文件里不能提前写 super-read-only，
+# 否则官方镜像初始化时执行 ALTER USER 会报 ERROR 1290 直接退出。
+echo
+echo "==> 从库上锁（super_read_only）"
+for slave in mysql-slave-1 mysql-slave-2; do
+  docker compose exec -T "$slave" mysql -uroot -prootpass -e \
+    "SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;" 2>/dev/null \
+    && echo "    ${slave}: super_read_only=ON"
+done
+
 echo
 echo "两个都 Replica_IO_Running: Yes / Replica_SQL_Running: Yes 就通了。"
 echo "不通的话先看 Last_IO_Error，九成是 repl 用户或网络别名的问题。"

@@ -4,9 +4,11 @@ relay-log=relay-bin
 gtid-mode=ON
 enforce-gtid-consistency=ON
 
-# 只读：故意用 super-read-only，防止实验时手滑直接在从库写坏数据
-read-only=ON
-super-read-only=ON
+# 只读：不在配置文件里开，改由 scripts/init-replica.sh 建好复制后 SET GLOBAL 打开。
+# 原因：官方镜像的 entrypoint 初始化时要用 root 执行 ALTER USER 设密码，
+# 一旦这里写 super-read-only=ON，初始化直接失败（ERROR 1290），容器 Exit(1)。
+read_only=ON
+
 
 slow_query_log=ON
 slow_query_log_file=/var/lib/mysql/slow.log

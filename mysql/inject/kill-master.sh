@@ -12,8 +12,15 @@ for s in mysql-slave-1 mysql-slave-2; do
 done
 
 echo
-echo "==> kill -9 主库（容器内 1 号进程）"
-docker compose exec -T mysql-master bash -c 'kill -9 1' || true
+echo "==> kill -9 主库"
+# 两个坑，都踩过：
+# 1) 在容器内 kill -9 1 无效：内核会丢弃同一 PID namespace 内发给 1 号进程的 SIGKILL。
+# 2) docker kill 虽然也是 SIGKILL，但它算"手动停止"，restart 策略不会拉起容器。
+# 所以要从宿主 namespace 直接杀容器的 1 号进程 —— 这才等价于 OOM killer / 机器掉电。
+MPID=$(docker inspect -f '{{.State.Pid}}' dfl-master)
+echo "    容器 PID1 在宿主上的 pid = ${MPID}"
+kill -9 "$MPID"
+echo "    已 kill -9，容器会被 restart: unless-stopped 自动拉起"
 
 echo "==> 观察从库立刻发生了什么（5 秒内）"
 for i in 1 2 3 4 5; do

@@ -4,11 +4,12 @@ services:
   mysql-master:
     image: mysql:8.0
     container_name: dfl-master
+    restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
       MYSQL_DATABASE: demo
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - ./conf/master.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
       - ./conf/master-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
@@ -22,13 +23,14 @@ services:
   mysql-slave-1:
     image: mysql:8.0
     container_name: dfl-slave-1
+    restart: unless-stopped
     depends_on:
       mysql-master:
         condition: service_healthy
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
     ports:
-      - "3307:3306"
+      - "127.0.0.1:3307:3306"
     volumes:
       - ./conf/slave.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
       - slave1-data:/var/lib/mysql
@@ -41,13 +43,14 @@ services:
   mysql-slave-2:
     image: mysql:8.0
     container_name: dfl-slave-2
+    restart: unless-stopped
     depends_on:
       mysql-master:
         condition: service_healthy
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
     ports:
-      - "3308:3306"
+      - "127.0.0.1:3308:3306"
     volumes:
       - ./conf/slave-2.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
       - slave2-data:/var/lib/mysql
