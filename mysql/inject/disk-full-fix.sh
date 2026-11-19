@@ -134,5 +134,5 @@ rm 只做到第一个。mysqld 的 fd 还开着，refcount 还是 1，块一个�
   4. 把故障往前推一步：慢日志所在盘满，但 datadir 在另一个盘，业务会挂吗？
      这个答案会改变你的监控设计。
 
-重置：docker compose rm -sf mysql-disk-full && docker compose up -d mysql-disk-full
+重置重练：./lab.sh clean && ./lab.sh 05
 EOF

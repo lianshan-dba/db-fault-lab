@@ -10,7 +10,8 @@
 #   ./inject/disk-full.sh
 #
 # 为什么不用 --profile disk-full up -d：那样会把没写 profile 的服务（一主两从）
-# 一起拉起来，而它们的 3306 很可能已经被你本机的 MySQL 占着，直接 bind 失败。
+# 一起拉起来，白等 60 秒初始化。只写服务名就只起那一个。
+# 从仓库根目录跑更省事：./lab.sh 05
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -162,8 +163,8 @@ cat <<'EOF'
 
   5. 怎么在盘满之前发现？说两条能直接落地的监控，不要"加强监控"。
 
-自己试完，跑 ./inject/disk-full-fix.sh 对答案（完整演示一遍处置）。
+自己试完再对答案，完整演示一遍处置：在仓库根跑 ./lab.sh 05 fix
 
-重置：docker compose rm -sf mysql-disk-full && docker compose up -d mysql-disk-full
+重置重练：./lab.sh clean && ./lab.sh 05
 记到 docs/05-disk-full.md
 EOF

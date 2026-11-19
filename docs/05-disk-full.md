@@ -12,11 +12,18 @@ status: 已复现（容器 mysql:8.0.46 一条命令可复现；另有 8.4.11 �
 
 ## 复现
 
-三条命令，一分钟：
+一条命令，二十秒（首次要多花 1～3 分钟拉镜像）：
+
+```bash
+./lab.sh 05          # 起实例 → 灌慢日志 → 填满盘 → 打印现场和待答问题
+./lab.sh 05 fix      # 自己试过之后再跑，对答案
+```
+
+不想用入口脚本，也可以手工三行：
 
 ```bash
 cd mysql
-docker compose up -d mysql-disk-full      # 只起这一个实例（3309）
+docker compose up -d mysql-disk-full      # 只起这一个实例（宿主 13309）
 ./inject/disk-full.sh                     # 注入故障 + 打印现场
 ./inject/disk-full-fix.sh                 # 自己试过之后再跑，对答案
 ```
@@ -26,10 +33,10 @@ master 的 datadir 是 named volume，容量跟着宿主磁盘走 —— 想造 
 
 两个必须注意的地方：
 
-- **别写 `--profile disk-full up -d`**。compose 会把没写 profile 的服务（一主两从）一起拉起来，
-  而它们的 3306 通常已经被本机 MySQL 占着，直接 bind 失败。只写服务名就只起那一个。
+- **别写 `--profile disk-full up -d`**。compose 会把没写 profile 的服务（一主两从）一起拉起来，白等一分钟初始化。
+  只写服务名就只起那一个。
 - **容器停掉数据就没了**。这是 tmpfs 的特性，对故障实验正好是免费重置：
-  `docker compose rm -sf mysql-disk-full && docker compose up -d mysql-disk-full`，三十秒回到干净状态。
+  `./lab.sh clean && ./lab.sh 05`，二十秒回到干净状态。
 
 ## 环境
 
