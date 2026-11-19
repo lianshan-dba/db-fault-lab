@@ -28,7 +28,7 @@ ERROR 1114 (HY000): The table 't_big' is full              ← 批量插入要�
 ERROR 3675 (HY000): Create table 't_new' failed, as disk is full
 ```
 
-**第一次跑会多花 1～3 分钟拉镜像**（`mysql:8.0`，约 600MB，只此一次）。镜像拉不下来的处理见下面「国内网络」。
+**第一次跑会多花 10 秒～1 分钟拉镜像**（`mysql:8.0`，约 600MB，只此一次）。默认从作者的阿里云公共镜像拉，国内实测 13 秒，且是多架构（Apple Silicon 原生 arm64）；拉不动会自动回退 Docker Hub 和公共加速站，细节见下面「国内网络」。
 
 ## 前置条件（就三条）
 
@@ -77,29 +77,54 @@ macOS 没装 Docker 的话：`brew install --cask docker`，或者更轻的 `bre
 
 想留着现场慢慢看，就别 `clean`；容器停了数据才消失（datadir 是 tmpfs，这是特性不是 bug）。
 
-## 国内网络：镜像拉不下来
+## 国内网络：镜像怎么拉
 
-`./lab.sh` 会按顺序自动兜底：**指定仓库** → 官方源 → `docker.m.daocloud.io` → `docker.1panel.live` → `dockerproxy.net`（daoCloud 实测可用）。
+镜像默认从**作者的阿里云公共镜像**拉，不用配任何东西：
 
-**最快的一条路是自己有国内仓库**（阿里云 ACR、公司 harbor 都行），一次推好，别人拉得飞快：
-
-```bash
-# 你自己的机器上，把镜像推上去（600MB，几分钟）
-./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/你的命名空间
-
-# 别人这样用，不用改任何文件
-IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+```
+registry.cn-hangzhou.aliyuncs.com/lianshan-dba/mysql:8.0
 ```
 
-为什么写成可选参数、不直接写死进仓库：镜像挂在某个人的账号下，额度用完、仓库被删、账号欠费，别人的实验就跟着坏。所以它是「排最前面试」，拉不动会自动回退官方源和公共加速站。
+匿名可拉，国内实测 13 秒（600MB）。它是**多架构索引**（`linux/amd64` + `linux/arm64`），
+所以 Apple Silicon 的 Mac 拉到的是原生 arm64，不走模拟。digest 与 Docker Hub 官方索引完全一致
+（`sha256:7dcddc01…`），不是重新构建的野镜像。
+
+它不是唯一来源，`./lab.sh` 的顺序是：
+
+```
+你的指定仓库 → 上面的公共镜像 → Docker Hub → daocloud → 1panel → dockerproxy
+```
+
+任何一环失败都会自动往下走，**不会因为某一个镜像源挂了就跑不起来**。
+
+想换成自己的仓库（公司 harbor、自己的 ACR）：
+
+```bash
+# 推上去（一次）
+./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/你的命名空间
+
+# 用起来
+IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+
+# 或者干脆跳过所有镜像源，直接走 Docker Hub
+IMAGE_MIRROR=none ./lab.sh 05
+```
+
+**推的时候别用 `docker push`。** 它只能推本机那一个架构（x86 机器上就是 amd64），
+Apple Silicon 用户拉到会走 QEMU 模拟，MySQL 起得极慢还可能报错。`push-mirror.sh` 默认走
+`buildx imagetools create`，把源仓库的**整个多架构索引**复制过去，digest 与官方一致，可以直接核对：
+
+```bash
+docker buildx imagetools inspect registry.cn-hangzhou.aliyuncs.com/你的命名空间/mysql:8.0
+```
 
 用阿里云 ACR 个人版要注意三点（`tools/push-mirror.sh` 结尾也会提醒）：
 
 - 仓库必须设成**公开**，否则别人匿名拉会 401
 - `docker login` 用的是**仓库密码**，不是阿里云账号密码
-- 个人版有存储和流量额度，别当成唯一来源
+- 个人版有存储和流量额度，被大量拉取可能产生费用；作者随时可能撤掉这个公共镜像，撤了也不影响使用（会自动回退）
 
-三条都不行时的兜底：
+全都拉不动时的兜底：
 
 ```bash
 # 1) 永久配加速器：Docker Desktop → Settings → Docker Engine，json 里加

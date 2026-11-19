@@ -23,9 +23,13 @@ IMG_REPO=${IMAGE%%:*}          # mysql
 IMG_TAG=${IMAGE##*:}           # 8.0
 # 国内直连 Docker Hub 经常超时，按顺序试这些加速地址
 MIRRORS=${MIRRORS:-"docker.m.daocloud.io docker.1panel.live dockerproxy.net"}
-# 自己有阿里云 ACR / 私有仓库时填这里，会排在最前面试：
-#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/your-ns ./lab.sh 05
-IMAGE_MIRROR=${IMAGE_MIRROR:-}
+# 首选源：作者的国内公共镜像（阿里云杭州）。国内拉约 10 秒，比 Docker Hub 快得多。
+# 它失效了会自动回退，不影响使用。想换成自己的仓库：
+#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+# 想跳过它、直接走官方源：
+#   IMAGE_MIRROR=none ./lab.sh 05
+IMAGE_MIRROR=${IMAGE_MIRROR-registry.cn-hangzhou.aliyuncs.com/lianshan-dba}
+[ "$IMAGE_MIRROR" = "none" ] && IMAGE_MIRROR=""
 
 P_MASTER=${MASTER_PORT:-13306}
 P_SLAVE1=${SLAVE1_PORT:-13307}
@@ -50,9 +54,12 @@ db-fault-lab：在本机复现 MySQL 故障，一条命令。
 
 实验清单见 README.md，每篇复盘在 docs/。
 
-拉镜像慢或拉不动时，用你自己/公司的国内仓库：
-  IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/命名空间 ./lab.sh 05
-怎么把镜像放上去：./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/命名空间
+镜像默认从作者的国内公共镜像拉（阿里云杭州，约 10 秒）：
+  registry.cn-hangzhou.aliyuncs.com/lianshan-dba/mysql:8.0
+它失效会自动回退官方源和公共加速站。想换自己的仓库：
+  IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+跳过它直接走官方源：
+  IMAGE_MIRROR=none ./lab.sh 05
 EOF
 }
 
@@ -86,7 +93,7 @@ ensure_image() {
   fi
   say "本地没有 $IMAGE，开始拉取（约 600MB，只此一次）"
 
-  # 1) 自己指定的仓库（阿里云 ACR、公司内网 harbor 等）排最前面
+  # 1) 首选源（默认是作者的阿里云公共镜像）
   if [ -n "$IMAGE_MIRROR" ]; then
     note "优先用指定仓库：$IMAGE_MIRROR/$IMG_REPO:$IMG_TAG"
     if docker pull "$IMAGE_MIRROR/$IMG_REPO:$IMG_TAG"; then
@@ -94,7 +101,7 @@ ensure_image() {
       note "已从 $IMAGE_MIRROR 拉到，并打成 $IMAGE"
       return 0
     fi
-    warn "$IMAGE_MIRROR 拉不动（私有仓库要先 docker login，或仓库不存在），回退官方源"
+    warn "这个仓库用不了（未公开 / 已删除 / 需登录），回退下一个源，不影响实验"
   fi
 
   # 2) 官方源
@@ -228,7 +235,7 @@ do_doctor() {
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
     note "镜像 $IMAGE: 已就绪"
   else
-    warn "镜像 $IMAGE: 未拉取，首次跑实验会自动拉（约 600MB）"
+    note "镜像 $IMAGE: 未拉取，跑实验时会自动拉（首选源：${IMAGE_MIRROR:-官方 Docker Hub}）"
   fi
   local p
   for p in "$P_MASTER" "$P_SLAVE1" "$P_SLAVE2" "$P_DISK"; do
