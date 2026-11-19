@@ -16,6 +16,13 @@ cd db-fault-lab
 ./lab.sh 05
 ```
 
+机器上没有 `git`（不少服务器是这样）就直接下压缩包，内容一样：
+
+```bash
+curl -Lo lab.tar.gz https://github.com/lianshan-dba/db-fault-lab/archive/refs/heads/main.tar.gz
+tar xzf lab.tar.gz && cd db-fault-lab-main && ./lab.sh 05
+```
+
 十五秒后你会看到一个真实的两难现场：盘满了、业务写不进去、`df` 100%，而 `du` 只统计到一半。
 
 ```
