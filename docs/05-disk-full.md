@@ -98,6 +98,10 @@ ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is
 
 删掉慢日志之后：
 
+> **先注意时间点。** 注入刚完成时 `df` 的 Used 和 `du` 是**相等**的（都是 768M）——
+> 什么都没删，两边看到的是同一批文件。如果你看到两个数一直相等，先确认自己是不是
+> **还没做 `rm` 那一步**。分叉是删了之后才出现的，这也是这个实验唯一需要你亲手做对的动作。
+
 ```bash
 $ df -h /var/lib/mysql
 tmpfs  768M  768M  0  100% /var/lib/mysql     # 一点没降
@@ -108,6 +112,9 @@ $ du -sh /var/lib/mysql
 $ ls -l /proc/1/fd | grep deleted
 l-wx------. 1 mysql mysql 64 Nov 19 13:46 36 -> /var/lib/mysql/slow.log (deleted)
 ```
+
+> 顺带一句：`grep deleted` 平时就会输出几条 `/tmp/#68721849 (deleted)`，那是 InnoDB 的临时文件，
+> 一直在、也很小，不是嫌疑对象。**认准 `slow.log`**，别看见 `deleted` 就以为自己找到了。
 
 关掉慢日志：
 

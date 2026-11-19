@@ -111,6 +111,8 @@ echo "--- df：文件系统视角"
 docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
 echo "--- du：目录视角"
 docker compose exec -T "$SVC" du -sh /var/lib/mysql
+echo "    注意到没有：此刻 df 的 Used 和 du 是**相等**的（都 768M）。这不是实验失败 ——"
+echo "    什么都还没删，两边看到的是同一批文件。分叉要等你 rm 掉 slow.log 之后才出现。"
 echo "--- 两个大文件各占多少"
 docker compose exec -T "$SVC" ls -lh /var/lib/mysql/slow.log /var/lib/mysql/filler.bin \
   | awk '{print "    "$5"\t"$9}'
