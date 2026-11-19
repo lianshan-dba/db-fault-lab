@@ -79,9 +79,27 @@ macOS 没装 Docker 的话：`brew install --cask docker`，或者更轻的 `bre
 
 ## 国内网络：镜像拉不下来
 
-`./lab.sh` 会按顺序自动兜底：官方源 → `docker.m.daocloud.io` → `docker.1panel.live` → `dockerproxy.net`（daoCloud 实测可用）。
+`./lab.sh` 会按顺序自动兜底：**指定仓库** → 官方源 → `docker.m.daocloud.io` → `docker.1panel.live` → `dockerproxy.net`（daoCloud 实测可用）。
 
-三条都失败时的办法：
+**最快的一条路是自己有国内仓库**（阿里云 ACR、公司 harbor 都行），一次推好，别人拉得飞快：
+
+```bash
+# 你自己的机器上，把镜像推上去（600MB，几分钟）
+./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/你的命名空间
+
+# 别人这样用，不用改任何文件
+IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+```
+
+为什么写成可选参数、不直接写死进仓库：镜像挂在某个人的账号下，额度用完、仓库被删、账号欠费，别人的实验就跟着坏。所以它是「排最前面试」，拉不动会自动回退官方源和公共加速站。
+
+用阿里云 ACR 个人版要注意三点（`tools/push-mirror.sh` 结尾也会提醒）：
+
+- 仓库必须设成**公开**，否则别人匿名拉会 401
+- `docker login` 用的是**仓库密码**，不是阿里云账号密码
+- 个人版有存储和流量额度，别当成唯一来源
+
+三条都不行时的兜底：
 
 ```bash
 # 1) 永久配加速器：Docker Desktop → Settings → Docker Engine，json 里加
@@ -91,7 +109,7 @@ macOS 没装 Docker 的话：`brew install --cask docker`，或者更轻的 `bre
 docker save mysql:8.0 | gzip > mysql80.tar.gz     # 有网的机器
 docker load < mysql80.tar.gz                       # 你的机器
 
-# 3) 指定自己的源
+# 3) 指定别的加速站
 MIRRORS=docker.你的源.com ./lab.sh 05
 ```
 
@@ -121,6 +139,20 @@ MIRRORS=docker.你的源.com ./lab.sh 05
 | 容器里 `kill -9 1` 完全无效 | 正常：内核丢弃同一 PID namespace 内发给 1 号进程的 SIGKILL | 从宿主 `kill -9 $(docker inspect -f '{{.State.Pid}}' dfl-master)`，`01` 脚本就是这么做的 |
 | `ls /proc/1/fd` 空 / `Permission denied` | `exec` 默认是 root | 加 `-u mysql` |
 | 磁盘满会不会把我机器写满 | 不会 | 05 的 datadir 是 768M tmpfs，占用全在容器内存里 |
+
+## 仓库结构
+
+```
+lab.sh                 唯一入口：doctor / 01 / 02 / 05 / 05 fix / clean
+mysql/
+  docker-compose.yml   一主两从 + 05 的独立实例（端口可覆盖）
+  conf/                各实例配置、初始化 SQL
+  inject/              故障注入脚本，一个实验一个（这是仓库的主体）
+  scripts/             建复制关系等一次性操作
+tools/push-mirror.sh   把镜像推到你自己的国内仓库，加速别人拉取
+docs/                  复盘，一篇一个实验
+postgres/              预留，尚未开始
+```
 
 ## 实验清单
 

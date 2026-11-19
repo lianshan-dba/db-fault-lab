@@ -19,8 +19,13 @@ set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
 IMAGE=${MYSQL_IMAGE:-mysql:8.0}
+IMG_REPO=${IMAGE%%:*}          # mysql
+IMG_TAG=${IMAGE##*:}           # 8.0
 # 国内直连 Docker Hub 经常超时，按顺序试这些加速地址
 MIRRORS=${MIRRORS:-"docker.m.daocloud.io docker.1panel.live dockerproxy.net"}
+# 自己有阿里云 ACR / 私有仓库时填这里，会排在最前面试：
+#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/your-ns ./lab.sh 05
+IMAGE_MIRROR=${IMAGE_MIRROR:-}
 
 P_MASTER=${MASTER_PORT:-13306}
 P_SLAVE1=${SLAVE1_PORT:-13307}
@@ -44,6 +49,10 @@ db-fault-lab：在本机复现 MySQL 故障，一条命令。
   ./lab.sh clean         停掉并删除容器与数据卷
 
 实验清单见 README.md，每篇复盘在 docs/。
+
+拉镜像慢或拉不动时，用你自己/公司的国内仓库：
+  IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/命名空间 ./lab.sh 05
+怎么把镜像放上去：./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/命名空间
 EOF
 }
 
@@ -76,17 +85,31 @@ ensure_image() {
     return 0
   fi
   say "本地没有 $IMAGE，开始拉取（约 600MB，只此一次）"
+
+  # 1) 自己指定的仓库（阿里云 ACR、公司内网 harbor 等）排最前面
+  if [ -n "$IMAGE_MIRROR" ]; then
+    note "优先用指定仓库：$IMAGE_MIRROR/$IMG_REPO:$IMG_TAG"
+    if docker pull "$IMAGE_MIRROR/$IMG_REPO:$IMG_TAG"; then
+      docker tag "$IMAGE_MIRROR/$IMG_REPO:$IMG_TAG" "$IMAGE"
+      note "已从 $IMAGE_MIRROR 拉到，并打成 $IMAGE"
+      return 0
+    fi
+    warn "$IMAGE_MIRROR 拉不动（私有仓库要先 docker login，或仓库不存在），回退官方源"
+  fi
+
+  # 2) 官方源
   if docker pull "$IMAGE"; then
     note "拉取完成"
     return 0
   fi
 
-  say "官方源失败，换国内加速源"
+  # 3) 公共加速站
+  say "官方源失败，换公共加速源"
   local m
   for m in $MIRRORS; do
     note "尝试 $m ..."
-    if docker pull "$m/library/mysql:8.0"; then
-      docker tag "$m/library/mysql:8.0" "$IMAGE"
+    if docker pull "$m/library/$IMG_REPO:$IMG_TAG"; then
+      docker tag "$m/library/$IMG_REPO:$IMG_TAG" "$IMAGE"
       note "已从 $m 拉到，并打成 $IMAGE"
       return 0
     fi
@@ -94,17 +117,21 @@ ensure_image() {
 
   cat >&2 <<EOF
 
-!! 三条镜像都拉不下来。三个办法，按顺序试：
+!! 全部都拉不下来。四个办法，按顺序试：
 
-   1) 配加速器（最省事，一次配好永久有效）
+   1) 用你自己的国内仓库（最快，一次推好长期可用）
+        IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh ${EXP:-05}
+      怎么把镜像放上去：./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/你的命名空间
+
+   2) 配加速器（一次配好永久有效）
       Docker Desktop → Settings → Docker Engine，在 json 里加：
         "registry-mirrors": ["https://docker.m.daocloud.io"]
 
-   2) 借一台有网的机器搬过来（镜像只有 600MB，U 盘都行）
+   3) 借一台有网的机器搬过来（镜像只有 600MB，U 盘都行）
         docker save $IMAGE | gzip > mysql80.tar.gz     # 有网的机器
         docker load < mysql80.tar.gz                    # 你这台
 
-   3) 自己指定加速地址
+   4) 自己指定加速地址
         MIRRORS=docker.你的源.com ./lab.sh ${EXP:-05}
 
    注意：lab 用的数据全在容器里，镜像只是运行环境，换版本不影响实验结论。
