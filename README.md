@@ -35,7 +35,7 @@ tmpfs           768M  766M  2.1M 100% /var/lib/mysql     ← 文件系统视角
 affected_rows
 1                                                         ← 单行能插，骗人的
 ERROR 1114 (HY000): The table 't_big' is full              ← 批量插入要扩页，失败
-ERROR 3675 (HY000): Create table 't_new' failed, as disk is full
+ERROR 3675 (HY000): Create table/tablespace 't_new' failed, as disk is full
 ```
 
 **整个过程只拉一次镜像**（`mysql:8.0`，约 600MB），存在本地镜像库里反复用；datadir 也只初始化一次，`use` / `reset` 都不碰它。默认从作者的阿里云公共镜像拉，国内实测 13 秒，且是多架构（Apple Silicon 原生 arm64）；拉不动会自动回退 Docker Hub 和公共加速站，细节见下面「国内网络」。
@@ -250,7 +250,7 @@ postgres/              预留，尚未开始
 
 已完成的复盘：[01 · 主库被 kill](docs/01-kill-master.md) · [05 · 磁盘写满 + 慢日志句柄未释放](docs/05-disk-full.md)
 
-不想跑、只想看结论的，直接读这两篇——每篇都是「现象 → 时间线 → 排查过程（含走错的路）→ 根因 → 防复发」。
+不想跑、只想看结论的，直接读这两篇——每篇都是「问题现象 → 思考方向 → 解决方法」，现象段里的命令可以直接粘进终端复现。
 
 **05 用独立实例** `mysql-disk-full`，不跟主从共用：造 `ENOSPC` 不能填满你自己的硬盘。它带 `profiles`，所以 `docker compose up -d` 不会顺手把它拉起来；`./lab.sh up` 会显式把它单独起一次，之后一直复用。手工起也**别写 `--profile disk-full up -d`**（那会把一主两从一起拉起来）。
 
@@ -267,15 +267,25 @@ postgres/              预留，尚未开始
 
 ## 每篇复盘的格式
 
-固定五段，写不出第三段说明这个实验白做了：
+固定三段，写不出第二段说明这个实验白做了：
 
 ```
-## 现象（贴原始报错，不要转述）
-## 时间线（精确到分钟）
-## 排查过程（包括走错的路）
-## 根因
-## 防复发（改了什么监控 / 参数 / 流程）
+## 一、问题现象      ——  能直接粘进终端的命令 + 它真实的输出/报错号，原文照抄
+## 二、思考方向      ——  为什么会这样：判断顺序、排除掉的错路、机制
+## 三、解决方法      ——  处置步骤（同样带命令）+ 怎么验证好了 + 防复发
 ```
+
+两篇复盘（`docs/01`、`docs/05`）就是照这个写的，可以直接当模板。
+
+**「问题现象」这一段的硬标准：** 每条现象必须是「命令 + 屏幕上的原文」，像这样 ——
+
+```bash
+$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \
+    -e "CREATE TABLE t_new (id INT) ENGINE=InnoDB"
+ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is full
+```
+
+写"建表会失败"不算；写"报 ERROR 3675 ... disk is full"、并且给出发这条命令的方法，别人才能照着复现。
 
 ## 注意
 

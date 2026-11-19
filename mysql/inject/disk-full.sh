@@ -108,14 +108,21 @@ docker compose exec -T "$SVC" dd if=/dev/zero of=/var/lib/mysql/filler.bin \
 echo
 echo "========== 现在的现场 =========="
 echo "--- df：文件系统视角"
-docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
+DF_LINE=$(docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1)
+echo "$DF_LINE"
 echo "--- du：目录视角"
-docker compose exec -T "$SVC" du -sh /var/lib/mysql
+DU_NOW=$(docker compose exec -T "$SVC" du -sh /var/lib/mysql | awk '{print $1}')
+printf '    %s\t/var/lib/mysql\n' "$DU_NOW"
 echo "    注意到没有：此刻 df 的 Used 和 du 是**相等**的（上面两个数一样，差几 MB 是四舍五入）。"
 echo "    什么都还没删，两边看到的是同一批文件。分叉要等你 rm 掉 slow.log 之后才出现。"
 echo "--- 两个大文件各占多少"
 docker compose exec -T "$SVC" ls -lh /var/lib/mysql/slow.log /var/lib/mysql/filler.bin \
   | awk '{print "    "$5"\t"$9}'
+
+# 下面「照着敲」那一节要写真实的数字：删了 slow.log 之后 du 会掉多少、df 的 Used 现在是多少。
+# 编一个大概值最省事，但用户一对照就发现对不上，那这套脚本就没人信了。
+SLOW_H=$(docker compose exec -T "$SVC" du -h /var/lib/mysql/slow.log | awk '{print $1}')
+DF_USED=$(printf '%s' "$DF_LINE" | awk '{print $3}')
 
 echo
 echo "--- 业务写入的三种表现（注意差别，第 1 条会骗人）"
@@ -141,16 +148,60 @@ docker compose logs --tail=300 "$SVC" 2>&1 \
   | grep -E 'errno: 28|No space|MY-010907|disk is full' | tail -6 \
   || echo "    （没抓到，手动看：docker compose logs $SVC）"
 
+# ---------- 5. 照这个敲：命令 → 你会看到的报错 ----------
+# 光写"单行能插进去、批量会失败"没有用，用户要的是能直接粘进终端的命令，
+# 和粘进去之后屏幕上会出现的原文。所以这一段把命令和预期输出成对给出。
+cat <<EOF
+
+========== 现在轮到你（一）：先把现象复现出来，别急着删 ==========
+
+  下面每条都能直接粘进终端。报错和输出是这台机器刚才跑出来的原文。
+
+  ① 盘满没满：df 和 du 必须一起看，这是后面所有判断的起点
+       \$ docker exec -it dfl-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
+     ${DF_LINE}
+     ${DU_NOW}	/var/lib/mysql
+     → 两个数一样。此刻还什么都没删，相等是正常的，别以为脚本没生效。
+
+  ② 单行 INSERT：会成功。这就是这个故障最坑的地方
+       \$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \\
+           -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100))"
+     → 屏幕上什么都没有。非交互模式下 mysql 不打印 Query OK，没输出就是成功。
+       想看行数就自己选出来：
+       \$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \\
+           -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100)); SELECT ROW_COUNT() AS affected_rows;"
+       affected_rows
+       1
+
+     每条 mysql 命令前都会多打印一行
+       mysql: [Warning] Using a password on the command line interface can be insecure.
+     那是"命令行里带密码"的提示，不是错误，忽略它。
+
+  ③ 批量 INSERT 5000 行：要扩 .ibd，立刻失败
+       \$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \\
+           -e "INSERT INTO t_big(pad) SELECT REPEAT('y',1100) FROM information_schema.columns LIMIT 5000"
+     ERROR 1114 (HY000) at line 1: The table 't_big' is full
+
+  ④ CREATE TABLE：同样失败，但报的是另一个错号
+       \$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \\
+           -e "CREATE TABLE t_new (id INT) ENGINE=InnoDB"
+     ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is full
+
+  ② 成功、③④ 失败、而 df 已经 100% —— 三个现象同时成立，才是"盘满"的完整证据。
+  只凭 ② 就下结论"盘没问题"，是这类故障里最常见的误判。
+
+  ⑤ 服务端日志里只有一条，不会自己关慢日志
+       \$ docker logs dfl-disk-full 2>&1 | grep -E 'errno: 28|MY-010907' | tail -3
+     [ERROR] [MY-010907] [Server] Error writing file '/var/lib/mysql/slow.log' (errno: 28 - No space left on device)
+     → 只报错，不停写、也不自动关慢日志（8.0.46 / 8.4.11 都一样），所以那个 fd 会一直挂着。
+
+EOF
+
 cat <<'EOF'
 
-========== 现在轮到你 ==========
+========== 现在轮到你（二）：先写预测，再去动手 ==========
 
-盘满了，实例还活着，慢日志也还开着。接下来别急着敲命令，先回答：
-
-  0. 先登进去看一眼（在外面看 df 是不够的）：
-       容器内：docker exec -it dfl-disk-full mysql -uroot -prootpass demo
-       宿主机：mysql -h127.0.0.1 -P13309 -uroot -prootpass demo   ← 装客户端才有
-     账号 root / rootpass，库 demo。GUI 也是这套，端口 13309。
+盘满了，实例还活着，慢日志也还开着。动手之前先回答（答不上来就带着问题往下做）：
 
   1. 三类占用分得清吗？
      MySQL 能自己回收的（purge binlog、旧 relay log）、只能 rm 的、
@@ -170,9 +221,40 @@ cat <<'EOF'
 
   5. 怎么在盘满之前发现？说两条能直接落地的监控，不要"加强监控"。
 
-自己试完再对答案，完整演示一遍处置：在仓库根跑 ./lab.sh use 05 fix
+答案在下面（先写完预测再往下看）。
+EOF
 
-重置重练：./lab.sh reset 05 && ./lab.sh use 05   （原地复原，不重建容器）
-换别的故障：./lab.sh use 01 / use 02
-记到 docs/05-disk-full.md
+# 这一段要打印真实的 df / du 数字，所以必须用会展开变量的 heredoc。
+cat <<EOF
+
+========== 现在轮到你（三）：删了之后 ==========
+
+  ⑥ 删掉慢日志，然后立刻再看一眼
+       \$ docker exec -it dfl-disk-full rm -f /var/lib/mysql/slow.log
+       \$ docker exec -it dfl-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
+     ${DF_LINE}
+     → df 一行和上面 ① 完全一样（Used 还是 ${DF_USED}，一个字都没变）；
+       du 会小掉约 ${SLOW_H}（按块算，差几 M 是正常的，以你屏幕上的数为准）。
+       删除确实生效了，空间没回来 —— 这个分叉就是整个实验的核心。
+
+  ⑦ 找证据。这一步最容易得出错误结论，两种写法都试一遍
+       \$ docker exec -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
+     ls: cannot open directory '/proc/1/fd': Permission denied
+     → 默认给的是 root，读不到 mysqld 的 fd。屏幕上看不到，不等于句柄不存在。
+
+       \$ docker exec -u mysql -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
+     l-wx------  1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
+     → 认准 (deleted)。顺手看到的 /tmp/#NNN (deleted) 是 InnoDB 临时文件，一直在，别被它带偏。
+
+  ⑧ 不重启，把空间要回来（下面三种写法任选一种）
+       \$ docker exec -it dfl-disk-full mysql -uroot -prootpass -e "SET GLOBAL slow_query_log=OFF"
+       \$ docker exec -it dfl-disk-full sh -c 'df -h /var/lib/mysql'
+     → df 的 Used 会少掉约 ${SLOW_H}，Uptime 继续增长（没重启）。
+       另外两种：mv slow.log slow.log.1 再 FLUSH SLOW LOGS（标准做法，要 RELOAD 权限）；
+                 : > slow.log（不改 inode，能救急，官方不支持，可能留稀疏空洞）。
+
+  ⑨ 对着看我的处置过程：./lab.sh use 05 fix
+     然后复原重练：./lab.sh reset 05 && ./lab.sh use 05   （原地复原，不重建容器）
+     换别的故障：./lab.sh use 01 / use 02
+     记到 docs/05-disk-full.md（按「问题现象 / 思考方向 / 解决方法」三段写）
 EOF
