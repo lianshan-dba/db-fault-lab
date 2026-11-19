@@ -53,6 +53,6 @@ cat <<'EOF'
   3. 找到 holding 的会话后，正确的处置顺序是什么？直接 KILL 会有什么后果？
   4. 这个场景怎么提前发现？（提示：等 5 秒以上的会话要告警）
 
-收工：docker compose restart mysql-master
+收工：./lab.sh reset 02   （杀掉挂住的会话、撤掉 ALTER 加上的列）
 记到 docs/02-mdl-block.md
 EOF

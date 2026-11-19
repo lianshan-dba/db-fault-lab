@@ -2,17 +2,16 @@
 # db-fault-lab 一条命令复现入口
 #
 #   ./lab.sh              看有哪些实验
-#   ./lab.sh doctor       只做环境自检，不动容器
-#   ./lab.sh 05           复现 05：自动备镜像 → 起实例 → 注入故障 → 打印该自己回答的问题
-#   ./lab.sh 05 fix       自己试过之后再跑，对答案
-#   ./lab.sh 01           同上，主库 kill -9（会顺带建好一主两从）
-#   ./lab.sh 02           同上，元数据锁阻塞
-#   ./lab.sh clean        清掉容器和卷
+#   ./lab.sh up           把环境起起来（拉镜像只发生这一次，之后一直复用）
+#   ./lab.sh use 05       在当前环境里切到 05 的故障（不重建容器）
+#   ./lab.sh reset 05     把 05 原地复原，接着练下一个（不重建容器）
+#   ./lab.sh status       现在环境里是哪种故障、占了多少盘
+#   ./lab.sh clean        整套删掉（下次从头来）
 #
-# 唯一的前置条件是有 docker（含 compose v2）。镜像第一次会自动拉，之后不再拉。
+# 环境是常驻的：镜像只拉一次，datadir 只初始化一次。切故障靠脚本，不靠重建。
 #
 # 端口默认用 133xx，避开你本机可能已经占着的 3306/3307/3308：
-#   DISK_FULL_PORT=23309 ./lab.sh 05
+#   DISK_FULL_PORT=23309 ./lab.sh use 05
 #
 # 不用 set -e：每一步失败时要能打印人话，而不是直接退出留下半个环境。
 set -uo pipefail
@@ -25,9 +24,9 @@ IMG_TAG=${IMAGE##*:}           # 8.0
 MIRRORS=${MIRRORS:-"docker.m.daocloud.io docker.1panel.live dockerproxy.net"}
 # 首选源：作者的国内公共镜像（阿里云杭州）。国内拉约 10 秒，比 Docker Hub 快得多。
 # 它失效了会自动回退，不影响使用。想换成自己的仓库：
-#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh up
 # 想跳过它、直接走官方源：
-#   IMAGE_MIRROR=none ./lab.sh 05
+#   IMAGE_MIRROR=none ./lab.sh up
 IMAGE_MIRROR=${IMAGE_MIRROR-registry.cn-hangzhou.aliyuncs.com/lianshan-dba}
 [ "$IMAGE_MIRROR" = "none" ] && IMAGE_MIRROR=""
 
@@ -45,30 +44,34 @@ usage() {
   cat <<'EOF'
 db-fault-lab：在本机复现 MySQL 故障，一条命令。
 
-  ./lab.sh doctor        环境自检（docker / compose / 端口 / 镜像）
-  ./lab.sh 05            复现 05：磁盘写满 + 慢日志句柄未释放
-  ./lab.sh 05 fix        自己试过之后再看处置动作（对答案用）
-  ./lab.sh 01            复现 01：主库被 kill -9
-  ./lab.sh 02            复现 02：元数据锁阻塞
-  ./lab.sh conn          打印连接信息（用户名 / 密码 / 端口 / 两种登录命令）
-  ./lab.sh clean         停掉并删除容器与数据卷
+  ./lab.sh up            起常驻环境（镜像只拉这一次，之后一直复用）
+  ./lab.sh status        现在环境里是什么状态（容器 / 盘 / 复制）
+  ./lab.sh use 05        切到 05：磁盘写满 + 慢日志句柄未释放
+  ./lab.sh use 01        切到 01：主库被 kill -9（会顺带建好一主两从）
+  ./lab.sh use 02        切到 02：元数据锁阻塞
+  ./lab.sh use 05 fix    自己试过之后再看处置动作（对答案）
+  ./lab.sh reset 05      原地复原，接着练下一个（或 reset all）
+  ./lab.sh conn          打印连接信息（用户名 / 密码 / 端口 / 登录命令）
+  ./lab.sh down          停掉容器但留着数据，下次 up 很快
+  ./lab.sh clean         删掉容器与数据卷，下次从头来
 
+环境是常驻的：镜像和 datadir 只准备一次，切故障靠脚本，不靠重建容器。
 实验清单见 README.md，每篇复盘在 docs/。
 登录信息统一是 root / rootpass，复制账号 repl / replpass，端口见 ./lab.sh conn。
 
 镜像默认从作者的国内公共镜像拉（阿里云杭州，约 10 秒）：
   registry.cn-hangzhou.aliyuncs.com/lianshan-dba/mysql:8.0
 它失效会自动回退官方源和公共加速站。想换自己的仓库：
-  IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh 05
+  IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh up
 跳过它直接走官方源：
-  IMAGE_MIRROR=none ./lab.sh 05
+  IMAGE_MIRROR=none ./lab.sh up
 EOF
 }
 
 # 只探端口，不装 nc：bash 自带 /dev/tcp
 port_busy() { ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) >/dev/null 2>&1; }
 
-# 端口被占，但占的人就是我们自己的容器（第二次跑 fix 时会这样），不算冲突
+# 端口被占，但占的人就是我们自己的容器（反复 use / reset 时会这样），不算冲突
 port_is_ours() {
   docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -q "^dfl-[^ ]* .*:$1->"
 }
@@ -90,10 +93,10 @@ need_docker() {
 
 ensure_image() {
   if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    note "镜像已就绪：$IMAGE"
+    note "镜像已就绪：$IMAGE（不会重复拉）"
     return 0
   fi
-  say "本地没有 $IMAGE，开始拉取（约 600MB，只此一次）"
+  say "本地没有 $IMAGE，开始拉取（约 600MB，全机器只此一次）"
 
   # 1) 首选源（默认是作者的阿里云公共镜像）
   if [ -n "$IMAGE_MIRROR" ]; then
@@ -129,7 +132,7 @@ ensure_image() {
 !! 全部都拉不下来。四个办法，按顺序试：
 
    1) 用你自己的国内仓库（最快，一次推好长期可用）
-        IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh ${EXP:-05}
+        IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/你的命名空间 ./lab.sh up
       怎么把镜像放上去：./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/你的命名空间
 
    2) 配加速器（一次配好永久有效）
@@ -141,7 +144,7 @@ ensure_image() {
         docker load < mysql80.tar.gz                    # 你这台
 
    4) 自己指定加速地址
-        MIRRORS=docker.你的源.com ./lab.sh ${EXP:-05}
+        MIRRORS=docker.你的源.com ./lab.sh up
 
    注意：lab 用的数据全在容器里，镜像只是运行环境，换版本不影响实验结论。
 EOF
@@ -163,6 +166,16 @@ wait_healthy() { # $1=容器名 $2=超时秒数
 
 compose() { ( cd mysql && docker compose "$@" ); }
 
+is_running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]; }
+exists()     { docker inspect "$1" >/dev/null 2>&1; }
+
+# 05 的 datadir 是 tmpfs：容器在，现场就在。用慢日志大小判断「是否已经注入过」。
+dirty_05() {
+  local sz
+  sz=$(compose exec -T mysql-disk-full stat -c %s /var/lib/mysql/slow.log 2>/dev/null | tr -d '\r')
+  [ -n "${sz:-}" ] && [ "$sz" -gt 52428800 ]   # > 50M 说明灌过
+}
+
 # 实验一跑完，人的第一反应是「我要登进去自己看」。
 # 不给这条信息，他就只能去翻 docker-compose.yml 找密码，或者干脆跳过动手。
 print_conn() { # $1=容器名 $2=服务名 $3=宿主端口 $4=说明
@@ -183,28 +196,72 @@ print_conn() { # $1=容器名 $2=服务名 $3=宿主端口 $4=说明
 EOF
 }
 
+# ---------------- 把环境准备好（已在跑就直接复用） ----------------
+
+# 05 用的独立实例：768M tmpfs，盘满只发生在容器内存里
+ensure_05() {
+  need_port "$P_DISK" DISK_FULL_PORT "use 05"
+  ensure_image
+  if is_running dfl-disk-full; then
+    note "mysql-disk-full 已在跑，直接复用（不重新初始化）"
+    return 0
+  fi
+  if exists dfl-disk-full; then
+    say "mysql-disk-full 是停着的，拉起来（tmpfs 会重建，等于干净环境，约 30 秒）"
+  else
+    say "起独立实例 mysql-disk-full（datadir 是 768M 的 tmpfs，盘满只发生在容器里）"
+  fi
+  compose up -d mysql-disk-full || die "容器起不来。看日志：cd mysql && docker compose logs mysql-disk-full"
+  wait_healthy dfl-disk-full 240 || die "240 秒仍未 healthy。看日志：cd mysql && docker compose logs --tail=40 mysql-disk-full"
+}
+
+# 01 / 02 用的一主两从
+ensure_repl() {
+  need_port "$P_MASTER" MASTER_PORT 01
+  need_port "$P_SLAVE1" SLAVE1_PORT 01
+  need_port "$P_SLAVE2" SLAVE2_PORT 01
+  ensure_image
+  local started=0 c
+  for c in dfl-master dfl-slave-1 dfl-slave-2; do
+    is_running "$c" || started=1
+  done
+  if [ "$started" -eq 1 ]; then
+    say "起一主两从（首次初始化约 60 秒，之后一直复用）"
+    compose up -d || die "启动失败。看日志：cd mysql && docker compose logs --tail=40"
+  else
+    note "一主两从已在跑，直接复用"
+  fi
+  for c in dfl-master dfl-slave-1 dfl-slave-2; do
+    wait_healthy "$c" 300 || die "$c 没起来。看日志：cd mysql && docker compose logs --tail=40 $c"
+  done
+}
+
 # ---------------- 各实验 ----------------
 
-run_05() {
-  need_port "$P_DISK" DISK_FULL_PORT 05
-  ensure_image
-  say "起独立实例 mysql-disk-full（datadir 是 768M 的 tmpfs，盘满只发生在容器里）"
-  compose up -d mysql-disk-full || die "容器起不来。看日志：cd mysql && docker compose logs mysql-disk-full"
-  say "等实例初始化（首次约 30 秒）"
-  wait_healthy dfl-disk-full 240 || die "240 秒仍未 healthy。看日志：cd mysql && docker compose logs --tail=40 mysql-disk-full"
-
-  if [ "${MODE:-inject}" = "fix" ]; then
+use_05() {
+  local mode=${1:-inject}
+  ensure_05
+  if [ "$mode" = "fix" ]; then
+    if ! dirty_05; then
+      die "环境里现在是干净的，没有可处置的现场。先切过去：./lab.sh use 05"
+    fi
     say "处置演示（对答案）"
     ./mysql/inject/disk-full-fix.sh
     cat <<EOF
 
 ----------------------------------------------------------------
 答案看完了。真正要留下的是你自己那句话：当时你以为是什么、看到什么才改主意。
-把它写成 docs/05 的「排查过程」，然后 ./lab.sh clean。
+把它写成 docs/05 的「排查过程」，然后 ./lab.sh reset 05 复原（不用重建容器）。
 ----------------------------------------------------------------
 EOF
     print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"
     return 0
+  fi
+
+  # 同一个环境反复练的关键：上次的现场先原地抹掉，而不是 docker rm 重来
+  if dirty_05; then
+    say "环境里还留着上次 05 的现场，先原地复原（一两秒，不重建容器）"
+    ./mysql/inject/disk-full-reset.sh >/dev/null || die "复原失败，单独跑一遍看输出：./mysql/inject/disk-full-reset.sh"
   fi
 
   say "注入故障"
@@ -213,25 +270,16 @@ EOF
 
 ----------------------------------------------------------------
 上面那几个问题就是这次要练的。自己动手试完（先写预测，再去 rm），
-再看处置演示：./lab.sh 05 fix
-重置重练：./lab.sh clean && ./lab.sh 05
+再看处置演示：./lab.sh use 05 fix
+练完复原、换下一个故障：./lab.sh reset 05 && ./lab.sh use 01
 ----------------------------------------------------------------
 EOF
   print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"
 }
 
-run_01() {
-  need_port "$P_MASTER" MASTER_PORT 01
-  need_port "$P_SLAVE1" SLAVE1_PORT 01
-  need_port "$P_SLAVE2" SLAVE2_PORT 01
-  ensure_image
-  say "起一主两从（首次初始化约 60 秒）"
-  compose up -d || die "启动失败。看日志：cd mysql && docker compose logs --tail=40"
-  for c in dfl-master dfl-slave-1 dfl-slave-2; do
-    wait_healthy "$c" 300 || die "$c 没起来。看日志：cd mysql && docker compose logs --tail=40 $c"
-    note "$c healthy"
-  done
-  say "建立复制关系（GTID 自动定位）"
+use_01() {
+  ensure_repl
+  say "建立复制关系（GTID 自动定位；已经在复制就重建一遍，几秒）"
   ./mysql/scripts/init-replica.sh
   say "注入：kill -9 主库"
   ./mysql/inject/kill-master.sh
@@ -240,17 +288,107 @@ run_01() {
   note "复制账号是 repl / replpass（只给复制用，不是给你登的）"
 }
 
-run_02() {
-  need_port "$P_MASTER" MASTER_PORT 02
-  ensure_image
-  say "起主库（02 用不到从库，只起一个，省内存）"
-  compose up -d mysql-master || die "容器起不来。看日志：cd mysql && docker compose logs --tail=40 mysql-master"
-  wait_healthy dfl-master 300 || die "主库没起来。看日志：cd mysql && docker compose logs --tail=40 mysql-master"
+use_02() {
+  ensure_repl
   note "主库 healthy（表 t_pk 有 10 万行，初始化时已灌好）"
   say "注入：元数据锁阻塞"
   ./mysql/inject/mdl-block.sh
   print_conn dfl-master mysql-master "$P_MASTER" "主库 mysql-master"
   note "被阻塞的会话要另开一个窗口才看得到，别在同一个会话里等"
+  note "复原：./lab.sh reset 02（杀掉挂住的会话，把加上的列撤掉）"
+}
+
+# ---------------- 复原 / 状态 / 起停 ----------------
+
+reset_one() { # $1=实验号
+  case "$1" in
+    05)
+      if ! is_running dfl-disk-full; then note "mysql-disk-full 没在跑，没什么可复原的"; return 0; fi
+      ./mysql/inject/disk-full-reset.sh
+      ;;
+    01|02)
+      local c
+      for c in dfl-master dfl-slave-1 dfl-slave-2; do
+        is_running "$c" || { note "$c 没在跑，跳过"; return 0; }
+      done
+      if [ "$1" = "02" ]; then
+        ./mysql/inject/mdl-reset.sh
+      else
+        say "复原 01：等主库起来，重新接上复制"
+        wait_healthy dfl-master 300 || die "主库没起来，看日志：cd mysql && docker compose logs --tail=40 mysql-master"
+        ./mysql/scripts/init-replica.sh | tail -8
+      fi
+      ;;
+    *) die "不认识的实验号：$1（有 01 / 02 / 05）" ;;
+  esac
+}
+
+do_reset() {
+  need_docker
+  case "${1:-all}" in
+    all)
+      reset_one 05
+      reset_one 01
+      ;;
+    *) reset_one "$1" ;;
+  esac
+  printf '\n'
+  note "复原完成。切下一个：./lab.sh use 01 / use 02 / use 05"
+}
+
+do_status() {
+  need_docker
+  local c rs
+  for c in dfl-master dfl-slave-1 dfl-slave-2 dfl-disk-full; do
+    if is_running "$c"; then
+      printf '    %-14s 运行中  健康 %s\n' "$c" "$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' "$c" 2>/dev/null)"
+    elif exists "$c"; then
+      printf '    %-14s 已停止\n' "$c"
+    else
+      printf '    %-14s 不存在\n' "$c"
+    fi
+  done
+  if is_running dfl-disk-full; then
+    printf '\n==> 05 的盘（tmpfs 768M）\n'
+    compose exec -T mysql-disk-full sh -c 'df -h /var/lib/mysql | tail -1; du -sh /var/lib/mysql; ls -lh /var/lib/mysql/slow.log /var/lib/mysql/filler.bin 2>/dev/null' \
+      | sed 's/^/    /' || true
+    if dirty_05; then note "状态：已注入（练完用 ./lab.sh reset 05 复原）"; else note "状态：干净"; fi
+  fi
+  if is_running dfl-slave-1; then
+    printf '\n==> 复制状态\n'
+    rs=$(compose exec -T mysql-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" 2>/dev/null \
+      | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source')
+    if [ -z "${rs:-}" ]; then
+      note "还没建复制关系（./lab.sh use 01 会建）"
+    else
+      printf '%s\n' "$rs" | sed 's/^/    /'
+    fi
+  fi
+  printf '\n'
+}
+
+do_up() {
+  need_docker
+  ensure_image
+  say "把环境起起来（镜像和 datadir 只准备这一次，之后一直复用）"
+  ensure_repl
+  ensure_05
+  do_status
+  cat <<'EOF'
+环境常驻了，接下来不用再等初始化：
+    ./lab.sh use 05      磁盘写满 + 慢日志句柄未释放
+    ./lab.sh use 01      主库被 kill -9
+    ./lab.sh use 02      元数据锁阻塞
+    ./lab.sh reset 05    原地复原，接着练下一个
+    ./lab.sh status      随时看现在是什么状态
+EOF
+}
+
+do_down() {
+  need_docker
+  say "停掉容器（数据留着，下次 ./lab.sh up 几秒就回来）"
+  compose --profile disk-full stop
+  note "已停。彻底删掉用 ./lab.sh clean"
 }
 
 do_doctor() {
@@ -266,35 +404,35 @@ do_doctor() {
   for p in "$P_MASTER" "$P_SLAVE1" "$P_SLAVE2" "$P_DISK"; do
     if port_busy "$p"; then warn "端口 $p: 被占用"; else note "端口 $p: 空闲"; fi
   done
-  note "内存建议 ≥ 4G（一主两从同时跑）"
+  note "内存建议 ≥ 4G（一主两从 + 05 实例同时跑）"
   if command -v free >/dev/null 2>&1; then note "本机内存: $(free -g | awk 'NR==2{print $2"G"}')"; fi
-  printf '\n自检完。没问题就跑：./lab.sh 05\n'
+  printf '\n自检完。没问题就跑：./lab.sh up\n'
 }
 
 do_clean() {
   need_docker
   say "停掉并删除所有容器与数据卷"
   compose --profile disk-full down --remove-orphans -v
-  note "已清理。下次 ./lab.sh 05 是全新建环境。"
+  note "已清理。下次 ./lab.sh up 是全新环境（镜像还在，不会重新拉）。"
 }
 
 do_conn() {
   need_docker
   local any=0
-  if docker ps --format '{{.Names}}' | grep -qx dfl-master; then
+  if is_running dfl-master; then
     print_conn dfl-master mysql-master "$P_MASTER" "主库 mysql-master"; any=1
   fi
-  if docker ps --format '{{.Names}}' | grep -qx dfl-slave-1; then
+  if is_running dfl-slave-1; then
     print_conn dfl-slave-1 mysql-slave-1 "$P_SLAVE1" "从库 mysql-slave-1"; any=1
   fi
-  if docker ps --format '{{.Names}}' | grep -qx dfl-slave-2; then
+  if is_running dfl-slave-2; then
     print_conn dfl-slave-2 mysql-slave-2 "$P_SLAVE2" "从库 mysql-slave-2"; any=1
   fi
-  if docker ps --format '{{.Names}}' | grep -qx dfl-disk-full; then
+  if is_running dfl-disk-full; then
     print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"; any=1
   fi
   if [ "$any" -eq 0 ]; then
-    printf '\n==> 现在没有 lab 容器在跑。先起一个：./lab.sh 05\n'
+    printf '\n==> 现在没有 lab 容器在跑。先起环境：./lab.sh up\n'
     printf '    固定账号：root / rootpass，实验库 demo，复制账号 repl / replpass\n\n'
   fi
 }
@@ -303,14 +441,32 @@ MODE=inject
 case "${1:-}" in
   ""|list|-h|--help|help) usage ;;
   doctor)                 do_doctor ;;
-  clean)                  do_clean ;;
+  up|start)               do_up ;;
+  down|stop)              do_down ;;
+  status|ps)              do_status ;;
   conn|连接|login)        do_conn ;;
-  01|02|05)
+  clean)                  do_clean ;;
+  reset)                  do_reset "${2:-all}" ;;
+  use)
+    EXP=${2:-}; [ -z "$EXP" ] && die "用法：./lab.sh use 05 | use 01 | use 02"
+    need_docker
+    case "$EXP" in
+      05) use_05 "${3:-inject}" ;;
+      01) use_01 ;;
+      02) use_02 ;;
+      *)  die "不认识的实验号：$EXP（有 01 / 02 / 05）" ;;
+    esac
+    ;;
+  01|02|05)               # 兼容老写法：./lab.sh 05 [fix] 等价于 ./lab.sh use 05 [fix]
     EXP=$1
     MODE=${2:-inject}
     [ "$MODE" = "fix" ] && [ "$EXP" != "05" ] && die "只有 05 有 fix 演示（其他实验的答案在 docs/ 里）"
     need_docker
-    "run_$EXP"
+    case "$EXP" in
+      05) use_05 "$MODE" ;;
+      01) use_01 ;;
+      02) use_02 ;;
+    esac
     ;;
   *) die "不认识的参数：$1（不带参数看用法）" ;;
 esac
