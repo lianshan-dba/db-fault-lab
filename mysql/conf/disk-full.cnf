@@ -1,0 +1,24 @@
+# 05 号实验（磁盘写满）专用配置
+#
+# 这个实例的 datadir 挂在一块 768M 的 tmpfs 上。只有容量可控，盘满才造得出来 ——
+# 01/02 用的 mysql-master 是 named volume，容量跟着宿主磁盘走，想填满就填满你自己的盘了。
+#
+# 它是独立实例（3309），不要在它上面做别的实验。
+
+[mysqld]
+server-id = 99
+
+# 盘一共就 768M，能省的都省掉，否则初始化就吃掉一半
+innodb_redo_log_capacity = 32M
+innodb_buffer_pool_size  = 64M
+
+# 不写 binlog：这个实验只关心慢日志，binlog 会来抢空间，把故障搅成二义性
+skip-log-bin
+
+# 慢日志必须和数据在同一个盘上 —— 这是整个实验成立的前提。
+# 慢日志单独挂盘的话，盘满只会让日志写不进去，业务 INSERT 照样成功，
+# "写入不了数据"这个症状就永远演不出来。
+slow_query_log      = ON
+slow_query_log_file = /var/lib/mysql/slow.log
+long_query_time     = 1
+log_slow_extra      = ON

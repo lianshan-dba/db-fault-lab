@@ -31,11 +31,20 @@ docker compose exec mysql-master mysql -uroot -prootpass demo
 | 02 | 元数据锁阻塞 | `inject/mdl-block.sh` | 怎么从 `performance_schema.metadata_locks` 找到源头会话 |
 | 03 | 半同步退化成异步 | 停掉两个从库再压测 | 主库写入为什么突然变慢，怎么确认 |
 | 04 | 从库延迟 | 主库跑大事务 / 无主键表批量更新 | 区分"真延迟"和"`Seconds_Behind_Master` 撒谎" |
-| 05 | 磁盘写满 | 灌数据到 datadir 上限 | 报错顺序：先写不进去的是 binlog 还是 redo |
+| 05 | 磁盘写满 + 慢日志句柄未释放 | `inject/disk-full.sh` | 删了日志 `df` 不降，不重启怎么把空间放回来 |
 | 06 | binlog 被清理导致从库断流 | `PURGE BINARY LOGS` | `1236` 错误的三种成因和各自的修法 |
 | 07 | 连接数打满 | 脚本开 200 个空闲连接 | 从 `too many connections` 到能登录的过程 |
 
 （03 之后陆续补，每做完一个补一篇 `docs/`）
+
+**05 用的是独立实例** `mysql-disk-full`（3309，datadir 挂在一块 768M 的 tmpfs 上），不跟主从共用 ——
+造 `ENOSPC` 不能填满你自己的硬盘。它不在默认启动范围里，要单独起：
+
+```bash
+docker compose up -d mysql-disk-full
+```
+
+不要写成 `--profile disk-full up -d`，那会把一主两从一起拉起来，而它们的 3306 通常已被本机 MySQL 占着。
 
 ## 每篇复盘的格式
 
@@ -52,5 +61,7 @@ docker compose exec mysql-master mysql -uroot -prootpass demo
 ## 注意
 
 - 这套东西只在本机跑，**不要**接到任何真实环境。
+- 如果本机 3306 已经被 MySQL 占着（DBA 的机器基本都是），`docker compose up -d` 会在 bind 端口时失败。
+  改 compose 里的映射端口，或者只起需要的那几个服务。
 - 提交前扫一遍：内网 IP、主机名、公司名、账号密码。示例里统一用 `10.0.0.x` 和 `db-prod-01` 这类假值。
 - 所有密码都是 `rootpass` / `replpass`，仅用于本地实验，不要复用。

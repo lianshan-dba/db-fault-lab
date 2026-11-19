@@ -60,6 +60,36 @@ services:
       timeout: 3s
       retries: 30
 
+  # 05 号实验（磁盘写满）专用实例，独立于上面那套一主两从。
+  #
+  #   docker compose --profile disk-full up -d
+  #   ./inject/disk-full.sh
+  #
+  # 为什么不用 named volume：volume 的容量跟着宿主磁盘走，想造 ENOSPC
+  # 就得把你自己机器的盘填满。换成 768M 的 tmpfs，盘满只发生在容器内存里。
+  #
+  # 代价是容器一停数据就没了 —— 对故障实验来说是优点，等于免费重置。
+  mysql-disk-full:
+    profiles: ["disk-full"]
+    image: mysql:8.0
+    container_name: dfl-disk-full
+    # 故意不设 restart：盘满时容器如果被反复拉起，现象就看不到了
+    restart: "no"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+    ports:
+      - "127.0.0.1:3309:3306"
+    volumes:
+      - ./conf/disk-full.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+    tmpfs:
+      - /var/lib/mysql:rw,size=768m
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
 volumes:
   master-data:
   slave1-data:
