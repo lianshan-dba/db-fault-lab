@@ -145,6 +145,11 @@ cat <<'EOF'
 
 盘满了，实例还活着，慢日志也还开着。接下来别急着敲命令，先回答：
 
+  0. 先登进去看一眼（在外面看 df 是不够的）：
+       容器内：docker exec -it dfl-disk-full mysql -uroot -prootpass demo
+       宿主机：mysql -h127.0.0.1 -P13309 -uroot -prootpass demo   ← 装客户端才有
+     账号 root / rootpass，库 demo。GUI 也是这套，端口 13309。
+
   1. 三类占用分得清吗？
      MySQL 能自己回收的（purge binlog、旧 relay log）、只能 rm 的、
      rm 了也没用的 —— 各举一个，并说出为什么。

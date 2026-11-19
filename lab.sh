@@ -50,9 +50,11 @@ db-fault-lab：在本机复现 MySQL 故障，一条命令。
   ./lab.sh 05 fix        自己试过之后再看处置动作（对答案用）
   ./lab.sh 01            复现 01：主库被 kill -9
   ./lab.sh 02            复现 02：元数据锁阻塞
+  ./lab.sh conn          打印连接信息（用户名 / 密码 / 端口 / 两种登录命令）
   ./lab.sh clean         停掉并删除容器与数据卷
 
 实验清单见 README.md，每篇复盘在 docs/。
+登录信息统一是 root / rootpass，复制账号 repl / replpass，端口见 ./lab.sh conn。
 
 镜像默认从作者的国内公共镜像拉（阿里云杭州，约 10 秒）：
   registry.cn-hangzhou.aliyuncs.com/lianshan-dba/mysql:8.0
@@ -161,6 +163,26 @@ wait_healthy() { # $1=容器名 $2=超时秒数
 
 compose() { ( cd mysql && docker compose "$@" ); }
 
+# 实验一跑完，人的第一反应是「我要登进去自己看」。
+# 不给这条信息，他就只能去翻 docker-compose.yml 找密码，或者干脆跳过动手。
+print_conn() { # $1=容器名 $2=服务名 $3=宿主端口 $4=说明
+  local c=$1 svc=$2 port=$3 desc=$4
+  printf '\n==> 连进去（%s）：用户 root  密码 rootpass  库 demo\n' "$desc"
+  cat <<EOF
+    ① 容器内的客户端（本机没装 mysql 也能用，推荐先用这条）
+         docker compose -f mysql/docker-compose.yml exec $svc mysql -uroot -prootpass demo
+
+    ② 宿主机上的客户端（装了 mysql-client 才行）
+         mysql -h127.0.0.1 -P$port -uroot -prootpass demo
+
+    ③ GUI（Navicat / DBeaver / DataGrip / TablePlus）
+         主机 127.0.0.1   端口 $port   用户 root   密码 rootpass   库 demo
+
+    注意：①②里看到 @@port 都是 3306，那是容器里的端口；从你机器连要写 $port。
+    只绑 127.0.0.1，别的机器连不进来。随时重看：./lab.sh conn
+EOF
+}
+
 # ---------------- 各实验 ----------------
 
 run_05() {
@@ -181,6 +203,7 @@ run_05() {
 把它写成 docs/05 的「排查过程」，然后 ./lab.sh clean。
 ----------------------------------------------------------------
 EOF
+    print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"
     return 0
   fi
 
@@ -198,6 +221,7 @@ EOF
   4. 三件事都能答之后，重置重练一遍：./lab.sh clean && ./lab.sh 05
 ----------------------------------------------------------------
 EOF
+  print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"
 }
 
 run_01() {
@@ -215,6 +239,9 @@ run_01() {
   ./mysql/scripts/init-replica.sh
   say "注入：kill -9 主库"
   ./mysql/inject/kill-master.sh
+  print_conn dfl-master mysql-master "$P_MASTER" "主库 mysql-master"
+  note "两个从库一样能登：端口 $P_SLAVE1 / $P_SLAVE2，容器 dfl-slave-1 / dfl-slave-2，用户 root / rootpass"
+  note "复制账号是 repl / replpass（只给复制用，不是给你登的）"
 }
 
 run_02() {
@@ -226,6 +253,8 @@ run_02() {
   note "主库 healthy（表 t_pk 有 10 万行，初始化时已灌好）"
   say "注入：元数据锁阻塞"
   ./mysql/inject/mdl-block.sh
+  print_conn dfl-master mysql-master "$P_MASTER" "主库 mysql-master"
+  note "被阻塞的会话要另开一个窗口才看得到，别在同一个会话里等"
 }
 
 do_doctor() {
@@ -253,11 +282,33 @@ do_clean() {
   note "已清理。下次 ./lab.sh 05 是全新建环境。"
 }
 
+do_conn() {
+  need_docker
+  local any=0
+  if docker ps --format '{{.Names}}' | grep -qx dfl-master; then
+    print_conn dfl-master mysql-master "$P_MASTER" "主库 mysql-master"; any=1
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx dfl-slave-1; then
+    print_conn dfl-slave-1 mysql-slave-1 "$P_SLAVE1" "从库 mysql-slave-1"; any=1
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx dfl-slave-2; then
+    print_conn dfl-slave-2 mysql-slave-2 "$P_SLAVE2" "从库 mysql-slave-2"; any=1
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx dfl-disk-full; then
+    print_conn dfl-disk-full mysql-disk-full "$P_DISK" "05 的独立实例 mysql-disk-full"; any=1
+  fi
+  if [ "$any" -eq 0 ]; then
+    printf '\n==> 现在没有 lab 容器在跑。先起一个：./lab.sh 05\n'
+    printf '    固定账号：root / rootpass，实验库 demo，复制账号 repl / replpass\n\n'
+  fi
+}
+
 MODE=inject
 case "${1:-}" in
   ""|list|-h|--help|help) usage ;;
   doctor)                 do_doctor ;;
   clean)                  do_clean ;;
+  conn|连接|login)        do_conn ;;
   01|02|05)
     EXP=$1
     MODE=${2:-inject}

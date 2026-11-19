@@ -31,6 +31,15 @@ docker compose up -d mysql-disk-full      # 只起这一个实例（宿主 13309
 `mysql-disk-full` 是**独立实例**，datadir 挂在一块 768M 的 tmpfs 上。不跟 `mysql-master` 共用，是因为
 master 的 datadir 是 named volume，容量跟着宿主磁盘走 —— 想造 `ENOSPC` 就得把你自己机器的盘填满。
 
+要自己登进去看（照 `df` 判断盘满是不够的，得进实例里试写入）：
+
+```bash
+docker exec -it dfl-disk-full mysql -uroot -prootpass demo       # 容器内客户端
+mysql -h127.0.0.1 -P13309 -uroot -prootpass demo                  # 宿主机有客户端时
+```
+
+账号 `root` / `rootpass`，库 `demo`，宿主端口 13309（`./lab.sh conn` 随时能查到）。
+
 两个必须注意的地方：
 
 - **别写 `--profile disk-full up -d`**。compose 会把没写 profile 的服务（一主两从）一起拉起来，白等一分钟初始化。

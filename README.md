@@ -46,7 +46,41 @@ macOS 没装 Docker 的话：`brew install --cask docker`，或者更轻的 `bre
 ./lab.sh doctor
 ```
 
-## 六个动作
+## 连接信息（怎么登进去）
+
+四个实例账号密码都一样，只有端口不同：
+
+| 实例 | 容器名 | 宿主端口 | 用户 | 密码 | 库 |
+|---|---|---|---|---|---|
+| mysql-master | `dfl-master` | 13306 | root | rootpass | demo |
+| mysql-slave-1 | `dfl-slave-1` | 13307 | root | rootpass | 随主库复制 |
+| mysql-slave-2 | `dfl-slave-2` | 13308 | root | rootpass | 随主库复制 |
+| mysql-disk-full | `dfl-disk-full` | 13309 | root | rootpass | demo |
+
+复制账号是 `repl` / `replpass`，只给从库连主库用，不是给你登的。
+
+三种连法，挑一种：
+
+```bash
+# ① 容器内的客户端 —— 本机没装 mysql 也能用，最省事
+docker exec -it dfl-disk-full mysql -uroot -prootpass demo
+
+# ② 宿主机上的客户端 —— 需要装了 mysql-client
+mysql -h127.0.0.1 -P13309 -uroot -prootpass demo
+
+# ③ GUI（Navicat / DBeaver / DataGrip / TablePlus）
+#    主机 127.0.0.1   端口 13309   用户 root   密码 rootpass   库 demo
+```
+
+忘了端口就跑 `./lab.sh conn`，它只列当前在跑的实例。
+
+三个容易犯的错：
+
+- **`@@port` 显示 3306 是正常的。** 容器内就是 3306，映射到宿主的 13309。写连接串要用宿主端口。
+- **`docker exec -i` 会吃掉你的 stdin。** 在脚本里连着写几条 `docker exec -i`，后面的会像被截断一样没输出 —— 加 `</dev/null`，或者改用 `docker compose exec -T`。
+- **只绑了 `127.0.0.1`。** 别的机器连不进来是有意的：这些实例没有任何防护，别往公网放。
+
+## 命令一览
 
 | 命令 | 做什么 | 大概多久 |
 |---|---|---|
@@ -55,6 +89,7 @@ macOS 没装 Docker 的话：`brew install --cask docker`，或者更轻的 `bre
 | `./lab.sh 05 fix` | 自己试过之后再看处置动作，对答案 | 5 秒 |
 | `./lab.sh 01` | 主库被杀（会先建好一主两从和复制关系） | 2 分钟 |
 | `./lab.sh 02` | 元数据锁阻塞 | 1 分钟 |
+| `./lab.sh conn` | 打印连接信息（账号、密码、端口、登录命令） | 1 秒 |
 | `./lab.sh clean` | 停掉并删除容器与数据卷 | 5 秒 |
 
 实验清单在下面，每篇复盘在 `docs/`。
@@ -168,7 +203,7 @@ MIRRORS=docker.你的源.com ./lab.sh 05
 ## 仓库结构
 
 ```
-lab.sh                 唯一入口：doctor / 01 / 02 / 05 / 05 fix / clean
+lab.sh                 唯一入口：doctor / 01 / 02 / 05 / 05 fix / conn / clean
 mysql/
   docker-compose.yml   一主两从 + 05 的独立实例（端口可覆盖）
   conf/                各实例配置、初始化 SQL
@@ -219,4 +254,4 @@ postgres/              预留，尚未开始
 
 - 这套东西只在本机跑，**不要**接到任何真实环境。
 - 提交前扫一遍：内网 IP、主机名、公司名、账号密码。示例里统一用 `10.0.0.x` 和 `db-prod-01` 这类假值。
-- 所有密码都是 `rootpass` / `replpass`，仅用于本地实验，不要复用。
+- 所有密码都是 `rootpass` / `replpass`，只给本地实验用，不要复用到任何真实环境（清单见上面「连接信息」）。
