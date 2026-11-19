@@ -126,7 +126,7 @@ ls: cannot open directory '/proc/1/fd': Permission denied
 
 # 正确写法：以 mysqld 自己的身份去看
 $ docker exec -u mysql -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
-l-wx------  1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
+l-wx------. 1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
 ```
 
 `(deleted)` 是关键。顺手还会看到几条 `/tmp/#NNN (deleted)`，那是 InnoDB 的临时文件，一直在、也很小，不是嫌疑对象。

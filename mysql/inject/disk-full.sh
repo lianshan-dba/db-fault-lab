@@ -243,7 +243,7 @@ cat <<EOF
      → 默认给的是 root，读不到 mysqld 的 fd。屏幕上看不到，不等于句柄不存在。
 
        \$ docker exec -u mysql -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
-     l-wx------  1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
+     l-wx------. 1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
      → 认准 (deleted)。顺手看到的 /tmp/#NNN (deleted) 是 InnoDB 临时文件，一直在，别被它带偏。
 
   ⑧ 不重启，把空间要回来（下面三种写法任选一种）

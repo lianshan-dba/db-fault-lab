@@ -26,14 +26,16 @@ status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46 上实跑�
 
 ## 一、问题现象
 
-### 现象 1：容器被杀，退出码 137
+### 现象 1：容器被强杀过，之后又被拉起来
 
 ```bash
-$ docker inspect -f '{{.State.ExitCode}} {{.RestartCount}}' dfl-master
-137 2
+$ docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' dfl-master
+1 2026-11-19T23:52:10.123456789Z
 ```
 
-`137 = 128 + 9`，就是 SIGKILL。`RestartCount` 加一，说明 docker 按 `restart: unless-stopped` 把它重新拉起来了。
+`RestartCount` 从 0 变成 1，说明这个容器被强杀过一次、然后被 docker 按 `restart: unless-stopped` 重新拉起来了。
+
+`ExitCode 137`（= 128 + 9，SIGKILL）只在「被杀掉、还没被拉起」的那一两秒里看得到；容器起来之后 `.State.ExitCode` 显示的是**当前这次运行**的 0，别拿它当证据。
 
 ### 现象 2：从库 1 秒内掉到 `Connecting`，报错 111
 
