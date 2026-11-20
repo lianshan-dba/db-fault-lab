@@ -1,0 +1,9 @@
+# 实验 06：binlog 被清理，从库断流（1236）
+NB=06
+PROFILE=06          # compose 里的 profiles 名，跟编号一致
+NAME=binlog-purged
+TITLE=binlog 被清理，从库断流
+DESC=一对一，主库 PURGE 掉从库还没读的 binlog，从库报 1236，只能全量重做
+PORTS="BINLOG_MASTER_PORT:13311 BINLOG_SLAVE_PORT:13312"
+CONTAINERS="dfl-06-master dfl-06-slave"
+CONN="主库 mysql-binlog-master|mysql-binlog-master|BINLOG_MASTER_PORT|dfl-06-master;从库 mysql-binlog-slave|mysql-binlog-slave|BINLOG_SLAVE_PORT|dfl-06-slave"

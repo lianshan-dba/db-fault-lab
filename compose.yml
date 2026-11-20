@@ -140,8 +140,56 @@ services:
       timeout: 3s
       retries: 40
 
+  # ==========================================================================
+  # 实验 06 · binlog 被清理，从库断流                    ./lab.sh use 06
+  # 一对一，因为故障发生在「主库和从库之间」，多一个从库只是白等初始化。
+  # 跟 01 用同一份 conf：主库要开 log-bin + GTID，从库要 gtid-mode=ON。
+  # ==========================================================================
+  mysql-binlog-master:
+    profiles: ["06"]
+    image: mysql:8.0
+    container_name: dfl-06-master
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+    ports:
+      - "127.0.0.1:${BINLOG_MASTER_PORT:-13311}:3306"
+    volumes:
+      - ./conf/master.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - ./conf/master-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - binlog-master-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  mysql-binlog-slave:
+    profiles: ["06"]
+    image: mysql:8.0
+    container_name: dfl-06-slave
+    restart: unless-stopped
+    depends_on:
+      mysql-binlog-master:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "127.0.0.1:${BINLOG_SLAVE_PORT:-13312}:3306"
+    volumes:
+      - ./conf/slave.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - binlog-slave-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
 volumes:
   master-data:
   slave1-data:
   slave2-data:
   mdl-data:
+  binlog-master-data:
+  binlog-slave-data:

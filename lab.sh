@@ -172,6 +172,7 @@ do_up() {
   note "  ./lab.sh use 05      磁盘写满 + 慢日志句柄未释放"
   note "  ./lab.sh use 01      主库被 kill -9"
   note "  ./lab.sh use 02      元数据锁阻塞"
+  note "  ./lab.sh use 06      binlog 被清理，从库断流"
   note "  ./lab.sh list        看全部"
   printf '\n'
 }
@@ -189,7 +190,7 @@ do_use() {
       die "环境里现在是干净的，没有可处置的现场。先切过去：./lab.sh use $LAB_NB"
     fi
     say "处置演示（对答案）：$LAB_NB $LAB_TITLE"
-    "$LAB_DIR/fix.sh"
+    "$LAB_DIR/fix.sh" || die "处置脚本中途失败（上面有原始报错）。容器还在，可以直接进容器看。"
     print_lab_conn
     printf '\n'
     note "复原重练：./lab.sh reset $LAB_NB && ./lab.sh use $LAB_NB"
@@ -205,7 +206,7 @@ do_use() {
   fi
 
   say "注入：$LAB_NB $LAB_TITLE"
-  "$LAB_DIR/inject.sh"
+  "$LAB_DIR/inject.sh" || die "注入中途失败（上面有原始报错）。环境还在，重跑一次通常会好：./lab.sh use $LAB_NB"
   print_lab_conn
   printf '\n'
   [ -x "$LAB_DIR/fix.sh" ] && note "自己试完再看处置演示：./lab.sh use $LAB_NB fix"
@@ -224,7 +225,7 @@ do_reset() {
       "$LAB_DIR/reset.sh" || warn "$LAB_NB 复原失败，单独跑：$LAB_DIR/reset.sh"
     done 3< <(labs_list)
     printf '\n'
-    note "全部复原完成。切下一个：./lab.sh use 01 / use 02 / use 05"
+    note "全部复原完成。切下一个：./lab.sh list 看清单，./lab.sh use 06"
     printf '\n'
     return 0
   fi

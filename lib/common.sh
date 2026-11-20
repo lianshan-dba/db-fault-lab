@@ -131,18 +131,9 @@ exists()     { docker inspect "$1" >/dev/null 2>&1; }
 # 实验一跑完，人的第一反应是「我要登进去自己看」。
 # 不给这条信息，他就只能去翻 compose 文件找密码，或者干脆跳过动手。
 print_conn() { # $1=描述 $2=容器名 $3=宿主端口
-  printf '\n==> 连进去（%s）：用户 root  密码 rootpass  库 demo\n' "$1"
-  cat <<EOF
-    ① 容器内的客户端（本机没装 mysql 也能用，推荐先用这条）
-         docker exec -it $2 mysql -uroot -prootpass demo
-
-    ② 宿主机上的客户端（装了 mysql-client 才行）
-         mysql -h127.0.0.1 -P$3 -uroot -prootpass demo
-
-    ③ GUI（Navicat / DBeaver / DataGrip / TablePlus）
-         主机 127.0.0.1   端口 $3   用户 root   密码 rootpass   库 demo
-
-    注意：①②里看到 @@port 都是 3306，那是容器里的端口；从你机器连要写 $3。
-    只绑 127.0.0.1，别的机器连不进来。随时重看：./lab.sh conn
-EOF
+  printf '\n==> 连进去（%s）：用户 root / 密码 rootpass / 库 demo\n' "$1"
+  printf '    容器内  docker exec -it %s mysql -uroot -prootpass demo\n' "$2"
+  printf '    宿主机  mysql -h127.0.0.1 -P%s -uroot -prootpass demo\n' "$3"
+  printf '    GUI     127.0.0.1:%s  root / rootpass  demo\n' "$3"
+  printf '    （容器里 @@port 永远是 3306，从你机器连才是 %s；只绑 127.0.0.1）\n' "$3"
 }
