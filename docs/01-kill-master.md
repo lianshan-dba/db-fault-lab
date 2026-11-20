@@ -7,19 +7,21 @@ status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46 上实跑�
 > 一句话：主库被强杀之后，从库多久发现、多久自愈、中间会不会丢数据。
 > 下面固定三段写：**问题现象 / 思考方向 / 解决方法**，命令和报错都是这台机器上跑出来的原文。
 
-## 怎么先把它跑起来
+## 环境构造
+
+常驻环境，镜像全机器只拉一次，之后切实验不重建：
 
 ```bash
 ./lab.sh use 01      # 起一主两从（首次约 1 分钟）+ 建复制关系 + kill -9 主库（10 秒）
 ./lab.sh reset 01    # 复原：等主库起来，重新接上复制（4 秒）
 ```
 
-## 环境
+环境本身就是考点的一部分：
 
-- 镜像 `mysql:8.0`（8.0.46-1.el9），docker compose 一主两从，GTID + ROW binlog
+- 镜像 `mysql:8.0`（8.0.46-1.el9），一主两从，GTID + ROW binlog
 - 主库 server-id=1，从库 2/3，`SOURCE_AUTO_POSITION=1`
 - 从库 `super_read_only=ON`（建好复制之后才打开，原因见解决方法第 4 条）
-- 注入方式：从**宿主 namespace** 杀容器的 1 号进程（不是容器内 kill）
+- 注入方式：从**宿主 namespace** 杀容器的 1 号进程（不是容器内 kill）—— 为什么必须是这种杀法，见思考方向第 1 条
 
 ---
 
@@ -67,7 +69,7 @@ $ docker logs dfl-01-master 2>&1 | grep -E 'XA crash recovery|ready for connecti
 [System] [MY-010931] [Server] /usr/sbin/mysqld: ready for connections. Version: '8.0.46'  port: 3306
 ```
 
-主库 T+1.8s 就能接受连接了，但从库要等到 T+60s 左右才重新连上 —— 中间那 58 秒的"复制中断"是**重试周期**造成的，不是主库没起来。
+主库 T+1.8s 就能接受连接了（其中 crash recovery 从开始到结束只用了 7ms），但从库要等到 T+60s 左右才重新连上 —— 中间那 58 秒的"复制中断"是**重试周期**造成的，不是主库没起来。
 
 ---
 
@@ -159,19 +161,6 @@ so it cannot execute this statement
   - mysqld_exporter 里对应 `mysql_slave_status_slave_io_running`、`mysql_slave_status_seconds_behind_master`，后者为 NaN 时别被 `avg()` 抹平
 - **流程**：主库重启/切换后，必须显式确认三件事 —— 从库 IO 线程状态、GTID 是否追平、有没有 `Last_IO_Error`。别等业务反馈"数据不对"。
 
-### 6. 一次演练的时间线
-
-| 时间 | 发生了什么 | 证据 |
-|---|---|---|
-| T+0s | 宿主上 `kill -9` 掉容器 PID 1 | `ExitCode=137`，`RestartCount` 1→2 |
-| T+0s | 从库 IO 线程立刻断开，转入 `Connecting` | 第 1 秒的 `SHOW REPLICA STATUS` 已是 Connecting |
-| T+1s | docker 按 `restart: unless-stopped` 拉起容器 | 日志 `Entrypoint script for MySQL Server 8.0.46 started` |
-| T+1.4s | InnoDB 初始化 + XA crash recovery | `Starting XA crash recovery...` → `finished.`（间隔 7ms） |
-| T+1.8s | 主库可接受连接 | `ready for connections ... port: 3306` |
-| T+1.8s ~ T+60s | 从库仍然 Connecting，不会立刻重连 | 报错里的 `delay of 60 seconds between attempts` |
-| T+60s 左右 | 重试周期到，自动重连成功 | `Replica_IO_Running: Yes`，GTID 自动补齐 |
-
----
 
 ## 这次实验没有证明的事
 

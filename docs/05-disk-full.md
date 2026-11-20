@@ -1,25 +1,25 @@
 ---
 title: 05 · 磁盘写满 + 慢日志句柄未释放
 date: 2026-11-19
-status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46；另有 8.4.11 真机对照）
+status: 已复现（容器 mysql:8.0.46；另有 8.4.11 真机对照）
 ---
 
-> 一句话说完：盘满了 → 业务写不进去 → 把大日志删了 → **`df` 一点都不降** → 不重启把空间要回来。
+> 盘满了 → 业务写不进去 → 把大日志删了 → **`df` 一点都不降** → 不重启把空间要回来。
 >
-> 下面固定三段写：**问题现象 / 思考方向 / 解决方法**。
-> 每段都给能直接粘进终端的命令和它真实的输出，不转述、不"大概"。
+> 三段写：**问题现象 / 思考方向 / 解决方法**。命令都能直接粘进终端，输出是原文。
 
-## 怎么先把它跑起来
+## 环境构造
+
+常驻环境，镜像全机器只拉一次，之后切实验不重建：
 
 ```bash
-./lab.sh up          # 第一次：备镜像（约 1 分钟，全机器只这一次）；以后必跳过
-./lab.sh use 05      # 起 05 自己的容器 + 灌慢日志 → 填满盘 → 打印命令和报错（首次 30 秒）
+./lab.sh up          # 第一次：备镜像（约 1 分钟）；以后必跳过
+./lab.sh use 05      # 起容器 → 灌慢日志 → 填满盘 → 打印命令和报错（首次 30 秒）
 ./lab.sh use 05 fix  # 自己试过之后再跑，对答案
 ./lab.sh reset 05    # 原地复原，接着练下一轮（1 秒，不重建容器）
 ```
 
-不想用入口脚本也能单独跑。容器定义在仓库根的 `compose.yml` 里（服务 `mysql-disk-full`，
-`profiles: ["05"]`），`labs/05-disk-full/` 里只有「怎么造这个故障」的脚本：
+不用入口脚本也能单独跑（容器定义在仓库根 `compose.yml`，服务 `mysql-disk-full`，`profiles: ["05"]`）：
 
 ```bash
 docker compose --profile 05 up -d          # 只起 05 的服务，不连带 01/02
@@ -27,27 +27,14 @@ docker compose --profile 05 up -d          # 只起 05 的服务，不连带 01/
 ./labs/05-disk-full/reset.sh               # 原地复原
 ```
 
-镜像还是那一个 `mysql:8.0`，不会因为换实验重新拉。
+环境本身就是考点的一部分：`/var/lib/mysql` 挂在 **768M tmpfs** 上（不用 named volume，否则造 `ENOSPC` 得先填满你自己的盘），初始化后占 130M。
 
-## 环境
-
-同一套机制在两种环境各跑一遍，数字对得上：
-
-| | 容器版（可复现） | 真机版（验证行为） |
-|---|---|---|
-| MySQL | 8.0.46 | 8.4.11 |
-| 盘 | tmpfs 768M | loop + ext4 974M |
-| 初始化后占用 | 130M | 119M |
-| 结论 | 完全一致 | 完全一致 |
-
-真机那台是 4C/15G 的测试机（Rocky Linux 10.2），**SELinux Enforcing**。要在真机复刻多两个坑：
+同一套故障在真机上也跑过（8.4.11 / loop + ext4 974M）：`ENOSPC`、`df`/`du` 分叉、`(deleted)` 句柄这三件事行为完全一致，真机只多两个 SELinux 的坑 —— 不处理 mysqld 读不了 datadir、bind 直接被拒：
 
 ```bash
-chcon -R -t mysqld_db_t /mnt/labdisk                  # 否则 mysqld 读不了 datadir
-semanage port -a -t mysqld_port_t -p tcp 3310         # 否则 bind 直接被拒
+chcon -R -t mysqld_db_t /mnt/labdisk
+semanage port -a -t mysqld_port_t -p tcp 3310
 ```
-
-容器里没有 SELinux，脚本不处理这两步。`ENOSPC`、`df`/`du` 的分叉、`(deleted)` 句柄这三件事在 tmpfs 和 ext4 上行为完全一样，真机只多给了 SELinux 和块设备。
 
 ---
 
@@ -61,22 +48,17 @@ tmpfs           768M  766M  2.1M 100% /var/lib/mysql
 766M	/var/lib/mysql
 ```
 
-**两个数相等是正常的，这时候还什么都没删。** 很多人在这步就以为脚本没生效 —— 分叉要到删除之后才出现。
+**两个数相等是正常的，这时候还什么都没删。** 分叉要到删除之后才出现 —— 很多人在这步就以为脚本没生效。
 
 注满这块盘的是两个文件：慢日志 363M、filler 273M（真实场景里后者是 binlog 暴涨 / 大事务 / 磁盘临时表）。
 
 ### 现象 2：单条 INSERT 能成功，批量插入和建表立刻失败
 
-> 下面每条 `mysql` 命令前面都会多打印一行 `mysql: [Warning] Using a password on the command line
+> 每条 `mysql` 命令前面都会多打印一行 `mysql: [Warning] Using a password on the command line
 > interface can be insecure.` —— 那是"命令行里带密码"的提示，不是错误，忽略它。
 
 ```bash
-# 单行：成功，屏幕上一片空白
-$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
-    -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100))"
-（无输出 = 成功。非交互模式下 mysql 不打印 Query OK）
-
-# 想看行数就自己选出来
+# 单行：成功，屏幕上一片空白（非交互模式下 mysql 不打印 Query OK）
 $ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
     -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100)); SELECT ROW_COUNT() AS affected_rows;"
 affected_rows
@@ -169,14 +151,14 @@ Linux 回收一个文件的数据块，要**同时**满足两个条件：
 
 - **去怀疑文件系统。** 查 `mount`、`dumpe2fs`，怀疑 loop 设备、怀疑挂载丢了 —— 全错。岔路口是同时看 `df` 和 `du`。
 - **用单行 INSERT 判断盘满。** 返回成功，一度以为盘已经好了，直到批量插入报 `ERROR 1114` 才发现被骗。
-- **`grep -i slow` 把自己骗了。** 关掉慢日志后想确认句柄没了，`grep -i slow` 输出一整屏 fd，其实匹配到的是**路径名** `/mnt/labdisk/`。要写 `grep 'slow\.log'` 并看有没有 `(deleted)`。重开慢日志会有一个**新的** fd 指向真实文件，那是正常的。
-- **`/proc/1/fd` 权限不足，看起来像"没有句柄"。** root 读 mysqld 的 fd 被拒，输出 `Permission denied`；如果顺手加了 `2>/dev/null`，就变成什么都没有 —— 和"确实没有"在输出上一模一样。必须 `-u mysql`。
+- **`grep -i slow` 把自己骗了。** 想确认句柄没了，`grep -i slow` 却输出一整屏 fd，匹配到的是**路径名** `/mnt/labdisk/`。要写 `grep 'slow\.log'` 并看有没有 `(deleted)`；重开慢日志会有一个**新的** fd 指向真实文件，那是正常的。
+- **`/proc/1/fd` 权限不足，看起来像"没有句柄"。** root 读 mysqld 的 fd 被拒，输出 `Permission denied`；顺手再加 `2>/dev/null` 就变成什么都没有 —— 和"确实没有"在输出上一模一样。必须 `-u mysql`。
 
 ### 5. 为什么不能重启
 
 重启要写盘的地方太多了：新建 binlog、InnoDB 打开 redo、`ibtmp1`/`tmpdir`、pid 文件，还有 crash recovery 自己的临时文件。盘满时这些全部可能失败，**初始化阶段就退出，实例起不来**。而且 `shutdown` 本身也可能卡住。
 
-所以处置方向从一开始就应该是「不重启，把句柄关掉」，而不是「重启一下试试」。
+所以处置方向从一开始就该是「不重启，把句柄关掉」，而不是「重启一下试试」。
 
 ---
 
@@ -223,30 +205,13 @@ SET GLOBAL slow_query_log=OFF 之后：df 768M → 406M（363M 立刻回收）
 写入恢复：INSERT ... 3548 rows affected
 ```
 
-全程 `Uptime` 单调增长，**没有重启**。
+全程 `Uptime` 单调增长，**没有重启**。真机（974M ext4）上数字不同、走势一样：`df` 958M/100% → `rm` 后仍是 958M、`du` 掉到 511M → 关慢日志后 511M（447M 回来）→ 清 filler 后 149M。
 
-### 4. 一次真机演练的时间线（974M ext4）
-
-| 时间 | 发生了什么 | 证据 |
-|---|---|---|
-| 21:18:47 | 独立实例初始化开始 | `MySQL Server Initialization - start` |
-| 21:18:51 | 初始化结束，占用 119M | `du -sh data` |
-| 21:19:00 | 实例就绪，监听 3310 | `ready for connections` |
-| 21:19:1x | 灌入 780KB 长 SQL × 600 条 | 慢日志 447M，盘到 64% |
-| 21:19:2x | filler 补刀 378M | `df` **958M / 100%** |
-| 21:19:27 | 建表失败 | `ERROR 3675 ... disk is full` |
-| 21:19:35 | 慢日志首次写失败 | `[ERROR] [MY-010907] ... errno: 28` |
-| 21:19:4x | `rm slow.log` | `df` **仍 958M**，`du` 掉到 511M |
-| 21:19:4x | 确认 fd 持有已删除 inode | `fd → slow.log (deleted)` |
-| 21:20:0x | `SET GLOBAL slow_query_log=OFF` | `df` **511M**，447M 回来 |
-| 21:20:1x | 清 filler、阈值改回、重开 | 新 `slow.log` 1.3K，`df` 149M |
-| 21:20:2x | 业务恢复 | `INSERT ... 3554 rows affected` |
-
-### 5. 防复发
+### 4. 防复发
 
 **配置**
 
-- 慢日志放**独立挂载点**并给容量上限 —— 但这会掩盖本故障链（见思考方向第 5 点），取舍要想清楚
+- 慢日志放**独立挂载点**并给容量上限 —— 代价是本故障链被掩盖（日志写满挤不到 datadir），取舍要想清楚
 - `logrotate` 配 `postrotate mysqladmin flush-logs`，**不要用 `copytruncate`**（和写入偏移打架）
 - `long_query_time` 不低于 1；`log_queries_not_using_indexes` 必须配 `log_throttle_queries_not_using_indexes` + `min_examined_row_limit`
 - 大 SQL 治理：批量 `INSERT` 拆批、`IN` 列表控长度 —— 一条 500KB 的 SQL 在慢日志里就是一条 500KB 的记录
@@ -269,9 +234,7 @@ SET GLOBAL slow_query_log=OFF 之后：df 768M → 406M（363M 立刻回收）
 
 ## 这次没有证明的事
 
-原定的"binlog 和 redo 谁先写不进去"没有测。这次是 filler 一次性打满的，没观察 redo 循环写和 binlog 增长在同一块盘上抢空间的先后顺序。
-
-下一步：把 `innodb_redo_log_capacity` 调小、开 `sync_binlog=1`，缓慢逼近 `ENOSPC`，看谁先报错。这是 05 的另一半。
+原定的"binlog 和 redo 谁先写不进去"没有测：这次是 filler 一次性打满的，没观察 redo 循环写和 binlog 增长在同一块盘上抢空间的先后顺序。下一步是把 `innodb_redo_log_capacity` 调小、开 `sync_binlog=1`，缓慢逼近 `ENOSPC`，看谁先报错。
 
 ## 自己再答一遍（不看上面）
 
