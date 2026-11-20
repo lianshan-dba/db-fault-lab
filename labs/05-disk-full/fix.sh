@@ -35,8 +35,12 @@ $COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 # ---------- 1. 直觉做法 ----------
 echo
 echo "==> 1. 大多数人的第一反应：rm 掉那个大日志"
-$COMPOSE exec -T "$SVC" rm -f /var/lib/mysql/slow.log
-sleep 1
+if $COMPOSE exec -T "$SVC" test -f /var/lib/mysql/slow.log; then
+  $COMPOSE exec -T "$SVC" rm -f /var/lib/mysql/slow.log
+  sleep 1
+else
+  echo "    （你已经自己删过 slow.log 了，这一步跳过；下面看的就是删完之后的状态）"
+fi
 echo "--- df（文件系统还剩多少）"
 $COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 echo "--- du（目录里还剩什么）"
