@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # 02 的复原：杀掉 mdl-block.sh 挂住的会话，把 ALTER 加上去的列撤掉。
 #
-# mdl-block.sh 用 docker compose exec -d 在容器里留了两个会话：
+# mdl-block.sh 用 $COMPOSE exec -d 在容器里留了两个会话：
 #   A：开了事务、摸过 t_pk、正在 SELECT SLEEP(600)
 #   B：ALTER TABLE t_pk ADD COLUMN，卡在等 MDL
 # 不清理的话，下一个实验（尤其 01）会莫名卡住，因为 t_pk 上还压着一把 MDL。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."          # 回到仓库根：compose.yml 和 conf/ 都在这儿
+COMPOSE="docker compose"                   # 一份 compose，服务靠 profiles 分组
 
-M="docker compose exec -T -e MYSQL_PWD=rootpass mysql-master mysql -uroot demo"
 
-if [ "$(docker inspect -f '{{.State.Running}}' dfl-master 2>/dev/null || echo false)" != "true" ]; then
-  echo "!! 主库没在跑，没什么可复原的。要起环境：./lab.sh up"
+M="$COMPOSE exec -T -e MYSQL_PWD=rootpass mysql-mdl mysql -uroot demo"
+
+if [ "$(docker inspect -f '{{.State.Running}}' dfl-02-mdl 2>/dev/null || echo false)" != "true" ]; then
+  echo "!! mysql-mdl 没在跑，没什么可复原的。要起环境：./lab.sh use 02"
   exit 0
 fi
 

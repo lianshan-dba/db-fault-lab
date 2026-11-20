@@ -12,20 +12,22 @@ status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46；另有 8.
 ## 怎么先把它跑起来
 
 ```bash
-./lab.sh up          # 第一次：备镜像 + 起环境（约 1 分钟）；以后几秒
-./lab.sh use 05      # 切到这个故障：灌慢日志 → 填满盘 → 打印命令和报错（2 秒）
+./lab.sh up          # 第一次：备镜像（约 1 分钟，全机器只这一次）；以后必跳过
+./lab.sh use 05      # 起 05 自己的容器 + 灌慢日志 → 填满盘 → 打印命令和报错（首次 30 秒）
 ./lab.sh use 05 fix  # 自己试过之后再跑，对答案
 ./lab.sh reset 05    # 原地复原，接着练下一轮（1 秒，不重建容器）
 ```
 
-不想用入口脚本，手工三行也一样：
+不想用入口脚本也能单独跑。容器定义在仓库根的 `compose.yml` 里（服务 `mysql-disk-full`，
+`profiles: ["05"]`），`labs/05-disk-full/` 里只有「怎么造这个故障」的脚本：
 
 ```bash
-cd mysql
-docker compose up -d mysql-disk-full      # 只起这一个实例（宿主 13309）
-./inject/disk-full.sh                     # 注入 + 打印现场和你该敲的命令
-./inject/disk-full-reset.sh               # 原地复原
+docker compose --profile 05 up -d          # 只起 05 的服务，不连带 01/02
+./labs/05-disk-full/inject.sh              # 注入 + 打印现场和你该敲的命令
+./labs/05-disk-full/reset.sh               # 原地复原
 ```
+
+镜像还是那一个 `mysql:8.0`，不会因为换实验重新拉。
 
 ## 环境
 
@@ -54,7 +56,7 @@ semanage port -a -t mysqld_port_t -p tcp 3310         # 否则 bind 直接被拒
 ### 现象 1：盘满了，`df` 和 `du` 都对得上
 
 ```bash
-$ docker exec -it dfl-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
+$ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
 tmpfs           768M  766M  2.1M 100% /var/lib/mysql
 766M	/var/lib/mysql
 ```
@@ -70,23 +72,23 @@ tmpfs           768M  766M  2.1M 100% /var/lib/mysql
 
 ```bash
 # 单行：成功，屏幕上一片空白
-$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \
+$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
     -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100))"
 （无输出 = 成功。非交互模式下 mysql 不打印 Query OK）
 
 # 想看行数就自己选出来
-$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \
+$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
     -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100)); SELECT ROW_COUNT() AS affected_rows;"
 affected_rows
 1
 
 # 批量 5000 行：要扩 .ibd，失败
-$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \
+$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
     -e "INSERT INTO t_big(pad) SELECT REPEAT('y',1100) FROM information_schema.columns LIMIT 5000"
 ERROR 1114 (HY000) at line 1: The table 't_big' is full
 
 # 建表：失败，但报的是另一个错号
-$ docker exec -it dfl-disk-full mysql -uroot -prootpass demo \
+$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
     -e "CREATE TABLE t_new (id INT) ENGINE=InnoDB"
 ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is full
 ```
@@ -96,8 +98,8 @@ ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is
 ### 现象 3：删掉慢日志，`df` 一点没降
 
 ```bash
-$ docker exec -it dfl-disk-full rm -f /var/lib/mysql/slow.log
-$ docker exec -it dfl-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
+$ docker exec -it dfl-05-disk-full rm -f /var/lib/mysql/slow.log
+$ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
 tmpfs           768M  766M  2.1M 100% /var/lib/mysql     ← 一点没降
 406M	/var/lib/mysql                                   ← 掉了 362M
 ```
@@ -107,10 +109,10 @@ tmpfs           768M  766M  2.1M 100% /var/lib/mysql     ← 一点没降
 ### 现象 4：服务端日志只有一条，慢日志还是 ON
 
 ```bash
-$ docker logs dfl-disk-full 2>&1 | grep -E 'errno: 28|MY-010907' | tail -3
+$ docker logs dfl-05-disk-full 2>&1 | grep -E 'errno: 28|MY-010907' | tail -3
 [ERROR] [MY-010907] [Server] Error writing file '/var/lib/mysql/slow.log' (errno: 28 - No space left on device)
 
-$ docker exec -it dfl-disk-full mysql -uroot -prootpass -e "SHOW VARIABLES LIKE 'slow_query_log'"
+$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass -e "SHOW VARIABLES LIKE 'slow_query_log'"
 Variable_name	Value
 slow_query_log	ON
 ```
@@ -121,11 +123,11 @@ slow_query_log	ON
 
 ```bash
 # 错误写法：默认是 root，读不到 mysqld 的 fd
-$ docker exec -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
+$ docker exec -it dfl-05-disk-full ls -l /proc/1/fd | grep 'slow\.log'
 ls: cannot open directory '/proc/1/fd': Permission denied
 
 # 正确写法：以 mysqld 自己的身份去看
-$ docker exec -u mysql -it dfl-disk-full ls -l /proc/1/fd | grep 'slow\.log'
+$ docker exec -u mysql -it dfl-05-disk-full ls -l /proc/1/fd | grep 'slow\.log'
 l-wx------. 1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
 ```
 

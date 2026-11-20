@@ -10,8 +10,7 @@ status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46 上实跑�
 ## 怎么先把它跑起来
 
 ```bash
-./lab.sh up          # 起环境（一主两从，首次约 1 分钟）
-./lab.sh use 01      # 建好复制关系 → kill -9 主库 → 打印从库当时的报错（10 秒）
+./lab.sh use 01      # 起一主两从（首次约 1 分钟）+ 建复制关系 + kill -9 主库（10 秒）
 ./lab.sh reset 01    # 复原：等主库起来，重新接上复制（4 秒）
 ```
 
@@ -29,7 +28,7 @@ status: 已复现（测试机 Rocky Linux 10.2 / Docker mysql:8.0.46 上实跑�
 ### 现象 1：容器被强杀过，之后又被拉起来
 
 ```bash
-$ docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' dfl-master
+$ docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' dfl-01-master
 1 2026-11-19T23:52:10.123456789Z
 ```
 
@@ -40,7 +39,7 @@ $ docker inspect -f '{{.RestartCount}} {{.State.StartedAt}}' dfl-master
 ### 现象 2：从库 1 秒内掉到 `Connecting`，报错 111
 
 ```bash
-$ docker exec -it dfl-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" | grep -E 'Running|Last_IO_Error'
+$ docker exec -it dfl-01-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" | grep -E 'Running|Last_IO_Error'
 Replica_IO_Running: Connecting
 Replica_SQL_Running: Yes
 Last_IO_Error: Error reconnecting to source 'repl@mysql-master:3306'.
@@ -53,7 +52,7 @@ Last_IO_Error: Error reconnecting to source 'repl@mysql-master:3306'.
 ### 现象 3：`Seconds_Behind_Source` 是 `NULL`，不是 `0`
 
 ```bash
-$ docker exec -it dfl-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" | grep Seconds_Behind
+$ docker exec -it dfl-01-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" | grep Seconds_Behind
 Seconds_Behind_Source: NULL
 ```
 
@@ -62,7 +61,7 @@ Seconds_Behind_Source: NULL
 ### 现象 4：主库 2 秒就活了，业务却感觉断了一分钟
 
 ```bash
-$ docker logs dfl-master 2>&1 | grep -E 'XA crash recovery|ready for connections' | tail -3
+$ docker logs dfl-01-master 2>&1 | grep -E 'XA crash recovery|ready for connections' | tail -3
 [Note] [MY-012469] [InnoDB] Starting XA crash recovery...
 [Note] [MY-012470] [InnoDB] XA crash recovery finished.
 [System] [MY-010931] [Server] /usr/sbin/mysqld: ready for connections. Version: '8.0.46'  port: 3306
@@ -79,8 +78,8 @@ $ docker logs dfl-master 2>&1 | grep -E 'XA crash recovery|ready for connections
 | 写法 | 进程死没死 | 等价于 |
 |---|---|---|
 | 容器内 `kill -9 1` | **没死** | 内核会丢弃同一 PID namespace 内发给 1 号进程的 SIGKILL |
-| `docker kill --signal=SIGKILL dfl-master` | 死了 | **手动停止**，`restart` 策略不介入，容器不会被拉起 |
-| `kill -9 $(docker inspect -f '{{.State.Pid}}' dfl-master)` | 死了 | 宿主机 OOM killer / 机器掉电，docker 会按策略重启 |
+| `docker kill --signal=SIGKILL dfl-01-master` | 死了 | **手动停止**，`restart` 策略不介入，容器不会被拉起 |
+| `kill -9 $(docker inspect -f '{{.State.Pid}}' dfl-01-master)` | 死了 | 宿主机 OOM killer / 机器掉电，docker 会按策略重启 |
 
 只有第三种才是"故障"，前两种演出来的东西会骗人：第一种什么都看不出，第二种容器躺着不起来、看起来像"重启策略失效"。
 
@@ -111,15 +110,15 @@ $ docker logs dfl-master 2>&1 | grep -E 'XA crash recovery|ready for connections
 
 ```bash
 # ① 主库活了吗
-$ docker ps --filter name=dfl-master --format '{{.Status}}'
+$ docker ps --filter name=dfl-01-master --format '{{.Status}}'
 Up 30 seconds (healthy)
 
 # ② 从库两个线程的状态
-$ docker exec -it dfl-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
+$ docker exec -it dfl-01-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
     | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_IO_Error'
 
 # ③ GTID 差多少（追平了就没有输出）
-$ docker exec -it dfl-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
+$ docker exec -it dfl-01-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
     | grep -E 'Retrieved_Gtid_Set|Executed_Gtid_Set'
 ```
 

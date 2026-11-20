@@ -2,10 +2,11 @@
 # 把两个从库接到主库上（GTID 自动定位，不需要记 binlog 位点）
 set -euo pipefail
 cd "$(dirname "$0")/.."
+COMPOSE="docker compose"
 
 for slave in mysql-slave-1 mysql-slave-2; do
   echo "==> ${slave} 建立复制关系"
-  docker compose exec -T "$slave" mysql -uroot -prootpass -e "
+  $COMPOSE exec -T "$slave" mysql -uroot -prootpass -e "
     STOP REPLICA;
     RESET REPLICA ALL;
     CHANGE REPLICATION SOURCE TO
@@ -23,7 +24,7 @@ echo "==> 等 3 秒后检查状态"
 sleep 3
 for slave in mysql-slave-1 mysql-slave-2; do
   echo "---- ${slave}"
-  docker compose exec -T "$slave" mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
+  $COMPOSE exec -T "$slave" mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
     | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source|Last_Error|Last_IO_Error' || true
 done
 
@@ -32,7 +33,7 @@ done
 echo
 echo "==> 从库上锁（super_read_only）"
 for slave in mysql-slave-1 mysql-slave-2; do
-  docker compose exec -T "$slave" mysql -uroot -prootpass -e \
+  $COMPOSE exec -T "$slave" mysql -uroot -prootpass -e \
     "SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;" 2>/dev/null \
     && echo "    ${slave}: super_read_only=ON"
 done

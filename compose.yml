@@ -1,0 +1,147 @@
+# db-fault-lab 的唯一 compose 文件。
+#
+# 设计只有三条，都是为了「加一个实验不用动基础设施」：
+#
+#   1) 一个 image。所有服务都用 mysql:8.0，拉一次全部复用。
+#      起第 2、3 个实验时不会再去拉镜像（lab.sh 里有 ensure_image 先看本地）。
+#
+#   2) 一个文件，用 profiles 按实验号分组。
+#        docker compose --profile 05 up -d     # 只起 05 的服务，不连带别的
+#        docker compose --profile 01 up -d     # 只起一主两从
+#      没写 --profile 时一个都不起（全部服务都带 profiles），
+#      所以 `docker compose up -d` 不会误把所有实验一起拉起来。
+#
+#   3) 每个服务只声明「它自己是谁」，故障怎么造在 labs/<编号>/inject.sh 里。
+#      注入脚本跟 compose 彻底分开 —— 换实验只换脚本，不碰这个文件。
+#
+# 加 06 的时候：在下面复制一段服务、改 profiles 和端口，再建 labs/06-xxx/ 放脚本。
+# lab.sh 不认识具体实验，它只按编号找 profiles 和脚本目录。
+name: db-fault-lab
+
+services:
+  # ==========================================================================
+  # 实验 01 · 主库被 kill -9                       ./lab.sh use 01
+  # 一主两从，否则从库的 Last_IO_Error 没地方看。
+  # ==========================================================================
+  mysql-master:
+    profiles: ["01"]
+    image: mysql:8.0
+    container_name: dfl-01-master
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+    ports:
+      # 宿主机端口放在 133xx，避开本机可能已经占着的 3306/3307/3308。
+      # 需要改：MASTER_PORT=23306 ./lab.sh use 01
+      - "127.0.0.1:${MASTER_PORT:-13306}:3306"
+    volumes:
+      - ./conf/master.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - ./conf/master-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - master-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  mysql-slave-1:
+    profiles: ["01"]
+    image: mysql:8.0
+    container_name: dfl-01-slave-1
+    restart: unless-stopped
+    depends_on:
+      mysql-master:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "127.0.0.1:${SLAVE1_PORT:-13307}:3306"
+    volumes:
+      - ./conf/slave.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - slave1-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  mysql-slave-2:
+    profiles: ["01"]
+    image: mysql:8.0
+    container_name: dfl-01-slave-2
+    restart: unless-stopped
+    depends_on:
+      mysql-master:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "127.0.0.1:${SLAVE2_PORT:-13308}:3306"
+    volumes:
+      - ./conf/slave-2.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - slave2-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ==========================================================================
+  # 实验 02 · 元数据锁阻塞                          ./lab.sh use 02
+  # 单实例。MDL 是实例内部的锁，跟主从无关 ——
+  # 为了它去拉一主两从，等于白等一分钟初始化、白占 800MB 内存。
+  # ==========================================================================
+  mysql-mdl:
+    profiles: ["02"]
+    image: mysql:8.0
+    container_name: dfl-02-mdl
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+    ports:
+      - "127.0.0.1:${MDL_PORT:-13310}:3306"
+    volumes:
+      - ./conf/mdl.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+      - ./conf/mdl-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+      - mdl-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  # ==========================================================================
+  # 实验 05 · 磁盘写满 + 慢日志句柄未释放            ./lab.sh use 05
+  #
+  # 为什么不用 named volume：volume 的容量跟着宿主磁盘走，想造 ENOSPC
+  # 就得把你自己机器的盘填满。换成 768M 的 tmpfs，盘满只发生在容器内存里。
+  # 代价是容器一停数据就没了 —— 对故障实验正好等于免费重置。
+  # ==========================================================================
+  mysql-disk-full:
+    profiles: ["05"]
+    image: mysql:8.0
+    container_name: dfl-05-disk-full
+    # 故意不设 restart：盘满时容器如果被反复拉起，现象就看不到了
+    restart: "no"
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: demo
+    ports:
+      - "127.0.0.1:${DISK_FULL_PORT:-13309}:3306"
+    volumes:
+      - ./conf/disk-full.cnf:/etc/mysql/conf.d/zz-lab.cnf:ro
+    tmpfs:
+      - /var/lib/mysql:rw,size=768m
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+volumes:
+  master-data:
+  slave1-data:
+  slave2-data:
+  mdl-data:

@@ -3,10 +3,12 @@
 # 最常见的线上"莫名其妙的卡死"：有人开了事务不提交，别人 ALTER 就卡在那儿，
 # 后面的 SELECT 全部排队。表面上"数据库没响应"，实际是锁等待。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."          # 回到仓库根：compose.yml 和 conf/ 都在这儿
+COMPOSE="docker compose"                   # 一份 compose，服务靠 profiles 分组
+
 
 echo "==> 会话 A：开事务、摸一下表、然后挂住 600 秒不提交"
-docker compose exec -T -d mysql-master mysql -uroot -prootpass demo -e "
+$COMPOSE exec -T -d mysql-mdl mysql -uroot -prootpass demo -e "
   START TRANSACTION;
   SELECT COUNT(*) FROM t_pk;
   SELECT SLEEP(600);
@@ -15,7 +17,7 @@ docker compose exec -T -d mysql-master mysql -uroot -prootpass demo -e "
 sleep 2
 
 echo "==> 会话 B（后台）：执行 ALTER，它会卡住"
-docker compose exec -T -d mysql-master mysql -uroot -prootpass demo -e "
+$COMPOSE exec -T -d mysql-mdl mysql -uroot -prootpass demo -e "
   ALTER TABLE t_pk ADD COLUMN note VARCHAR(32) DEFAULT NULL;
 " &
 
@@ -24,7 +26,7 @@ sleep 3
 echo "==> 现在从第三个连接看，现场是什么样："
 echo
 echo "---- 1. 谁在等锁（performance_schema 是唯一能看清 MDL 的地方）"
-docker compose exec -T mysql-master mysql -uroot -prootpass -e "
+$COMPOSE exec -T mysql-mdl mysql -uroot -prootpass -e "
   SELECT
     OBJECT_SCHEMA, OBJECT_NAME, LOCK_TYPE, LOCK_DURATION, LOCK_STATUS,
     OWNER_THREAD_ID
@@ -33,7 +35,7 @@ docker compose exec -T mysql-master mysql -uroot -prootpass -e "
 "
 
 echo "---- 2. 把 THREAD_ID 换成具体会话（关键：找到 holding 的那个，不是 waiting 的）"
-docker compose exec -T mysql-master mysql -uroot -prootpass -e "
+$COMPOSE exec -T mysql-mdl mysql -uroot -prootpass -e "
   SELECT
     t.PROCESSLIST_ID, t.PROCESSLIST_STATE, t.PROCESSLIST_TIME,
     LEFT(t.PROCESSLIST_INFO, 80) AS info
@@ -43,7 +45,7 @@ docker compose exec -T mysql-master mysql -uroot -prootpass -e "
 "
 
 echo "---- 3. 常规手段看到的是什么（对比一下，看能不能定位）"
-docker compose exec -T mysql-master mysql -uroot -prootpass -e "SHOW PROCESSLIST;"
+$COMPOSE exec -T mysql-mdl mysql -uroot -prootpass -e "SHOW PROCESSLIST;"
 
 cat <<'EOF'
 

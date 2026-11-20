@@ -2,12 +2,21 @@
 # 实验 01：把主库直接 kill -9
 # 这不是"优雅停止"，是模拟机器掉电 / OOM killer / 进程崩溃
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."          # 回到仓库根：compose.yml 和 conf/ 都在这儿
+COMPOSE="docker compose"                   # 一份 compose，服务靠 profiles 分组
 
+
+# 建复制关系是这个实验的前置条件：从库不跟着主库，kill 完就看不到 Last_IO_Error。
+# 放在注入里而不是 lab.sh 里，是因为「01 需要一主两从在复制」属于实验知识，
+# 换个实验（比如 06 binlog 断流）不需要这步。
+echo "==> 先确保复制是通的（已经在复制就重建一遍，几秒）"
+./scripts/init-replica.sh | tail -6
+
+echo
 echo "==> 记录杀之前的复制状态"
 for s in mysql-slave-1 mysql-slave-2; do
   echo "---- $s"
-  docker compose exec -T "$s" mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
+  $COMPOSE exec -T "$s" mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
     | grep -E 'Replica_IO_Running|Replica_SQL_Running|Seconds_Behind_Source' || true
 done
 
@@ -17,7 +26,7 @@ echo "==> kill -9 主库"
 # 1) 在容器内 kill -9 1 无效：内核会丢弃同一 PID namespace 内发给 1 号进程的 SIGKILL。
 # 2) docker kill 虽然也是 SIGKILL，但它算"手动停止"，restart 策略不会拉起容器。
 # 所以要从宿主 namespace 直接杀容器的 1 号进程 —— 这才等价于 OOM killer / 机器掉电。
-MPID=$(docker inspect -f '{{.State.Pid}}' dfl-master)
+MPID=$(docker inspect -f '{{.State.Pid}}' dfl-01-master)
 echo "    容器 PID1 在宿主上的 pid = ${MPID}"
 kill -9 "$MPID"
 echo "    已 kill -9，容器会被 restart: unless-stopped 自动拉起"
@@ -25,7 +34,7 @@ echo "    已 kill -9，容器会被 restart: unless-stopped 自动拉起"
 echo "==> 观察从库立刻发生了什么（5 秒内）"
 for i in 1 2 3 4 5; do
   echo "---- 第 ${i} 秒"
-  docker compose exec -T mysql-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
+  $COMPOSE exec -T mysql-slave-1 mysql -uroot -prootpass -e "SHOW REPLICA STATUS\G" \
     | grep -E 'Replica_IO_Running|Replica_SQL_Running|Last_IO_Error' || true
   sleep 1
 done
@@ -33,7 +42,7 @@ done
 echo
 echo "接下来要你自己做的："
 echo "  1. 把从库的 Last_IO_Error 原文抄下来（不要转述）"
-echo "  2. 等主库被 docker 拉起来：docker compose ps"
+echo "  2. 等主库被 docker 拉起来：$COMPOSE ps"
 echo "  3. 主库起来后，从库自己恢复了没有？多久恢复的？"
 echo "  4. 这个过程中主库的 crash recovery 做了什么（错误日志里找）"
 echo

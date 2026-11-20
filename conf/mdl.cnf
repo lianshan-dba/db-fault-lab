@@ -1,0 +1,17 @@
+# 02 号实验（元数据锁阻塞）专用配置
+#
+# 单实例，不参与复制：MDL 是实例内部的锁，跟主从没关系。
+# 不做 01 那套 server-id / gtid / log-bin，初始化能快一半。
+
+[mysqld]
+server-id = 20
+
+# 实验只关心锁等待，不需要 binlog 抢 IO
+skip-log-bin
+
+innodb_buffer_pool_size = 128M
+
+# ALTER 卡住的时候，慢日志能留下痕迹（0 秒 = 所有语句都记，方便对照）
+slow_query_log      = ON
+slow_query_log_file = /var/lib/mysql/slow.log
+long_query_time     = 1

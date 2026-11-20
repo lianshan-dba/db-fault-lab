@@ -1,0 +1,9 @@
+# 实验 01：主库被 kill -9
+NB=01
+PROFILE=01          # compose 里的 profiles 名，跟编号一致
+NAME=kill-master
+TITLE=主库被 kill -9
+DESC=一主两从，强杀主库容器的 1 号进程，看从库 Last_IO_Error 和 crash recovery
+PORTS="MASTER_PORT:13306 SLAVE1_PORT:13307 SLAVE2_PORT:13308"
+CONTAINERS="dfl-01-master dfl-01-slave-1 dfl-01-slave-2"
+CONN="主库 mysql-master|mysql-master|MASTER_PORT|dfl-01-master;从库 mysql-slave-1|mysql-slave-1|SLAVE1_PORT|dfl-01-slave-1;从库 mysql-slave-2|mysql-slave-2|SLAVE2_PORT|dfl-01-slave-2"

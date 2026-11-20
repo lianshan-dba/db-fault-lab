@@ -4,7 +4,7 @@
 #   ./tools/push-mirror.sh registry.cn-hangzhou.aliyuncs.com/your-ns
 #
 # 推完以后，别人这样用（不用改任何文件）：
-#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/your-ns ./lab.sh 05
+#   IMAGE_MIRROR=registry.cn-hangzhou.aliyuncs.com/your-ns ./lab.sh use 05
 # 为什么默认用 buildx imagetools create 而不是 docker push：
 #   docker push 只能推「本机已有镜像」的那一个架构（在 x86 机器上就是 amd64）。
 #   别人用 Apple Silicon 拉到 amd64 镜像会走 QEMU 模拟，又慢又容易出怪问题。

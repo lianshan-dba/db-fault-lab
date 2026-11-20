@@ -1,0 +1,9 @@
+# 实验 02：元数据锁阻塞
+NB=02
+PROFILE=02          # compose 里的 profiles 名，跟编号一致
+NAME=mdl-block
+TITLE=元数据锁阻塞
+DESC=一个不提交的事务压住 MDL，ALTER 和后面的查询全排队（独立单实例）
+PORTS="MDL_PORT:13310"
+CONTAINERS="dfl-02-mdl"
+CONN="MDL 实例 mysql-mdl|mysql-mdl|MDL_PORT|dfl-02-mdl"

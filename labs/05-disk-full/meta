@@ -1,0 +1,9 @@
+# 实验 05：磁盘写满 + 慢日志句柄未释放
+NB=05
+PROFILE=05          # compose 里的 profiles 名，跟编号一致
+NAME=disk-full
+TITLE=磁盘写满 + 慢日志句柄未释放
+DESC=768M tmpfs 上把慢日志灌满，rm 之后 df 不降，关慢日志才放回空间
+PORTS="DISK_FULL_PORT:13309"
+CONTAINERS="dfl-05-disk-full"
+CONN="独立实例 mysql-disk-full|mysql-disk-full|DISK_FULL_PORT|dfl-05-disk-full"

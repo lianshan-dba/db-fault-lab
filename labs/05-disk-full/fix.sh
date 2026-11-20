@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 # 实验 05 的处置：不重启实例，把被句柄卡住的空间放回来
 #
-# 先按 inject/disk-full.sh 末尾那五个问题自己试一遍，再跑这个对答案。
+# 先按 inject.sh 末尾那几个问题自己试一遍，再跑这个对答案。
 # 三段：先演「直觉做法为什么没用」，再演「正确做法为什么有效」，最后讲机制。
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."          # 回到仓库根：compose.yml 和 conf/ 都在这儿
+COMPOSE="docker compose"                   # 一份 compose，服务靠 profiles 分组
+
 
 SVC=mysql-disk-full
 DB=demo
-MYSQL="docker compose exec -T -e MYSQL_PWD=rootpass $SVC mysql -uroot $DB"
+MYSQL="$COMPOSE exec -T -e MYSQL_PWD=rootpass $SVC mysql -uroot $DB"
 
-if [ "$(docker inspect -f '{{.State.Running}}' dfl-disk-full 2>/dev/null || echo false)" != "true" ]; then
-  echo "!! 容器 dfl-disk-full 没在跑。按顺序来："
-  echo "     docker compose up -d mysql-disk-full"
-  echo "     ./inject/disk-full.sh"
+if [ "$(docker inspect -f '{{.State.Running}}' dfl-05-disk-full 2>/dev/null || echo false)" != "true" ]; then
+  echo "!! 容器 dfl-05-disk-full 没在跑。按顺序来："
+  echo "     docker compose --profile 05 up -d"
+  echo "     ./inject.sh"
   exit 1
 fi
 
-FSTYPE=$(docker compose exec -T "$SVC" stat -f -c %T /var/lib/mysql | tr -d '\r\n')
+FSTYPE=$($COMPOSE exec -T "$SVC" stat -f -c %T /var/lib/mysql | tr -d '\r\n')
 if [ "$FSTYPE" != "tmpfs" ]; then
   cat >&2 <<EOF
 !! 停手：/var/lib/mysql 挂在 [$FSTYPE] 上，不是 tmpfs。
@@ -28,27 +30,27 @@ fi
 
 UP0=$($MYSQL -N -B -e "SHOW GLOBAL STATUS LIKE 'Uptime'" | awk '{print $2}')
 echo "==> 0. 处置前的样子（Uptime ${UP0}s，最后用它证明没重启）"
-docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
+$COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 
 # ---------- 1. 直觉做法 ----------
 echo
 echo "==> 1. 大多数人的第一反应：rm 掉那个大日志"
-docker compose exec -T "$SVC" rm -f /var/lib/mysql/slow.log
+$COMPOSE exec -T "$SVC" rm -f /var/lib/mysql/slow.log
 sleep 1
 echo "--- df（文件系统还剩多少）"
-docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
+$COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 echo "--- du（目录里还剩什么）"
-docker compose exec -T "$SVC" du -sh /var/lib/mysql
+$COMPOSE exec -T "$SVC" du -sh /var/lib/mysql
 echo "    ↑ du 掉了，df 一点没动。这就是那个坑。"
 
 # ---------- 2. 证据 ----------
 echo
 echo "==> 2. 为什么：谁还开着这个已经删掉的文件"
-# 坑：mysqld 在容器里以 mysql 用户跑，而 docker compose exec 默认给 root。
+# 坑：mysqld 在容器里以 mysql 用户跑，而 $COMPOSE exec 默认给 root。
 # root 读别人的 /proc/1/fd 会被拒，输出是 "Permission denied"；
 # 如果顺手 2>/dev/null，就变成「什么都没有」——和「确实没有句柄」长得一模一样。
 # 所以这里显式 -u mysql，并且把权限不足这种情况单独报出来。
-FD_LIST=$(docker compose exec -T -u mysql "$SVC" bash -c 'ls -l /proc/1/fd 2>&1') || true
+FD_LIST=$($COMPOSE exec -T -u mysql "$SVC" bash -c 'ls -l /proc/1/fd 2>&1') || true
 if printf '%s' "$FD_LIST" | grep -q 'Permission denied'; then
   echo "    !! 读不到 /proc/1/fd（权限不足），这不等于没有句柄。"
   echo "    !! 换成 -u mysql 再读一次，否则你会得出完全相反的结论。"
@@ -65,16 +67,16 @@ echo "==> 3. 不重启，只关慢日志 —— 等于让 mysqld 执行 close(fd
 $MYSQL -e "SET GLOBAL slow_query_log = OFF;"
 sleep 1
 echo "--- df"
-docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
+$COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 echo "--- 还有没有 slow.log 的句柄（精确匹配 slow.log，不是 slow）"
-docker compose exec -T -u mysql "$SVC" bash -c \
+$COMPOSE exec -T -u mysql "$SVC" bash -c \
   'ls -l /proc/1/fd 2>/dev/null | grep "slow\.log" || echo "    没有 slow.log 句柄了"'
 
 # ---------- 4. 清理与恢复 ----------
 echo
 echo "==> 4. 清掉人为的 filler（真实场景里对应大事务结束时自己释放的临时文件）"
-docker compose exec -T "$SVC" rm -f /var/lib/mysql/filler.bin
-docker compose exec -T "$SVC" df -h /var/lib/mysql | tail -1
+$COMPOSE exec -T "$SVC" rm -f /var/lib/mysql/filler.bin
+$COMPOSE exec -T "$SVC" df -h /var/lib/mysql | tail -1
 
 echo
 echo "==> 5. 阈值改回正常值，重新开慢日志"
@@ -89,7 +91,7 @@ $MYSQL -e "
 INSERT INTO t_big(pad) SELECT REPEAT('y',1100) FROM information_schema.columns LIMIT 5000;
 SELECT ROW_COUNT() AS affected_rows;
 SELECT COUNT(*) AS rows_now FROM t_big;" 2>&1 | tail -4 || true
-docker compose exec -T "$SVC" ls -lh /var/lib/mysql/slow.log | awk '{print "    新慢日志: "$5"\t"$9}'
+$COMPOSE exec -T "$SVC" ls -lh /var/lib/mysql/slow.log | awk '{print "    新慢日志: "$5"\t"$9}'
 
 UP1=$($MYSQL -N -B -e "SHOW GLOBAL STATUS LIKE 'Uptime'" | awk '{print $2}')
 echo
