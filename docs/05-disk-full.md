@@ -44,11 +44,13 @@ semanage port -a -t mysqld_port_t -p tcp 3310
 
 ```bash
 $ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
-tmpfs           768M  766M  2.1M 100% /var/lib/mysql
-766M	/var/lib/mysql
+tmpfs           768M  768M     0 100% /var/lib/mysql
+768M	/var/lib/mysql
 ```
 
 **两个数相等是正常的，这时候还什么都没删。** 分叉要到删除之后才出现 —— 很多人在这步就以为脚本没生效。
+
+> 脚本 ① 那行打的是 `766M  2.1M`：它抓的是 filler 刚写完、还没跑下面那三条 INSERT 的瞬间。留的 2M 缓冲跑几条语句就吃掉了，所以你自己敲是 `768M  0`。两个都对。
 
 注满这块盘的是两个文件：慢日志 363M、filler 273M（真实场景里后者是 binlog 暴涨 / 大事务 / 磁盘临时表）。
 
@@ -82,7 +84,7 @@ ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is
 ```bash
 $ docker exec -it dfl-05-disk-full rm -f /var/lib/mysql/slow.log
 $ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
-tmpfs           768M  766M  2.1M 100% /var/lib/mysql     ← 一点没降
+tmpfs           768M  768M     0 100% /var/lib/mysql     ← 一点没降
 406M	/var/lib/mysql                                   ← 掉了 362M
 ```
 
