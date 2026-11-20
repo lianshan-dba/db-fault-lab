@@ -78,7 +78,7 @@ ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is
 ```bash
 $ docker exec -it dfl-05-disk-full rm -f /var/lib/mysql/slow.log
 $ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
-tmpfs           768M  766M  2.1M 100% /var/lib/mysql     ← 一点没降，还是那个数
+tmpfs           768M  768M     0 100% /var/lib/mysql     ← 完全没降（比刚才多的 2M 是那几条 INSERT 写的）
 406M	/var/lib/mysql                                  ← 掉了约 360M
 ```
 
