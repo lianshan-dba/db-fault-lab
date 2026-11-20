@@ -37,16 +37,20 @@ db-fault-lab：在本机复现 MySQL 故障，一条命令。
   ./lab.sh down [05]     停掉容器但留着数据，下次 up 很快（不给编号 = 全部）
   ./lab.sh clean [05]    删掉容器与数据卷，下次从头来（镜像不删）
 
-每个实验是一个自包含的目录：labs/<编号>-<名字>/
-  compose.yml   这个实验自己的容器，project name 是 dfl-<编号>
-  meta          编号、标题、端口、容器名、连接信息
+容器只有一个来源：仓库根的 compose.yml（所有实验的服务都在里面，用 profiles 按编号分组）。
+  docker compose --profile 05 up -d     只起 05 的服务，01/02 一动不动
+每个实验的脚本放各自的目录，换实验只换脚本，不碰 compose.yml：
+
+labs/<编号>-<名字>/
+  meta          编号、profile、端口、容器名、连接信息（加实验只认这一份）
   inject.sh     注入故障（会打印命令和真实报错）
   reset.sh      原地复原（不重建容器）
   fix.sh        可选，处置演示
   dirty.sh      可选，返回 0 表示「现场还在」
   status.sh     可选，额外状态（比如 df、复制状态）
 
-实验之间没有任何共享容器，可以同时开着。
+镜像只有一个 mysql:8.0，拉一次全部实验复用，不会因为切实验重新拉。
+实验之间可以同时开着。
 登录信息统一 root / rootpass，实验库 demo；复制账号 repl / replpass。
 
 镜像默认从作者的国内公共镜像拉（阿里云杭州，约 10 秒）：
