@@ -4,11 +4,56 @@ date: 2026-11-19
 status: 已复现（容器 mysql:8.0.46；另有 8.4.11 真机对照）
 ---
 
-> 盘满了 → 业务写不进去 → 把大日志删了 → **`df` 一点都不降** → 不重启把空间要回来。
->
-> 三段写：**问题现象 / 思考方向 / 解决方法**。命令都能直接粘进终端，输出是原文。
+# 背景
 
-## 环境构造
+生产环境中，磁盘满了，业务写不进去，把大日志删除之后，磁盘没有释放出来。
+
+**df检查没有释放，du检查已经释放了**
+
+```
+[root@db01 db-fault-lab]# docker exec -it dfl-05-disk-full  rm -rf /var/lib/mysql/slow.log
+[root@db01 db-fault-lab]# docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs           768M  768M     0 100% /var/lib/mysql
+406M	/var/lib/mysql
+```
+
+**单条数据插入没有问题，但是创建表和批量插入会报错。**
+
+```
+[root@db01 db-fault-lab]# docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
+>     -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100)); SELECT ROW_COUNT() AS affected_rows;"
+mysql: [Warning] Using a password on the command line interface can be insecure.
++---------------+
+| affected_rows |
++---------------+
+|             1 |
++---------------+
+[root@db01 db-fault-lab]#  docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
+>     -e "INSERT INTO t_big(pad) SELECT REPEAT('y',1100) FROM information_schema.columns LIMIT 5000"
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 1114 (HY000) at line 1: The table 't_big' is fullERROR 1114 (HY000) at line 1: The table 't_big' is full
+[root@db01 db-fault-lab]# docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
+>     -e "CREATE TABLE t_new (id INT) ENGINE=InnoDB"
+mysql: [Warning] Using a password on the command line interface can be insecure.
+ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is full
+```
+
+**检查慢日志状态，是开启状态。**
+
+```
+[root@db01 db-fault-lab]# docker exec -it dfl-05-disk-full mysql -uroot -prootpass -e "show variables like 'slow_query_log'"
+mysql: [Warning] Using a password on the command line interface can be insecure.
++----------------+-------+
+| Variable_name  | Value |
++----------------+-------+
+| slow_query_log | ON    |
++----------------+-------+
+```
+
+
+
+# 环境构造
 
 常驻环境，镜像全机器只拉一次，之后切实验不重建：
 
@@ -38,137 +83,28 @@ semanage port -a -t mysqld_port_t -p tcp 3310
 
 ---
 
-## 一、问题现象
 
-### 现象 1：盘满了，`df` 和 `du` 都对得上
 
-```bash
-$ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
-tmpfs           768M  768M     0 100% /var/lib/mysql
-768M	/var/lib/mysql
+# 故障分析
+
+**df检查没有释放，du检查已经释放了**
+
+`df` 读文件系统元数据，统计**已分配的块** → 被删但被占用的块还算在内，du是统计能看到的文件。
+
+说明有进程还在持有已经删除的文件，导致空间还没回收。
+
+```
+[root@db01 db-fault-lab]#  docker exec -u mysql -it dfl-05-disk-full ls -l /proc/1/fd | grep 'slow\.log'
+l-wx------. 1 mysql mysql 64 Nov 21 03:27 26 -> '/var/lib/mysql/slow.log (deleted)'
 ```
 
-**两个数相等是正常的，这时候还什么都没删。** 分叉要到删除之后才出现 —— 很多人在这步就以为脚本没生效。
+可以看到mysql还在持有的。
 
-> 脚本 ① 那行打的是 `766M  2.1M`：它抓的是 filler 刚写完、还没跑下面那三条 INSERT 的瞬间。留的 2M 缓冲跑几条语句就吃掉了，所以你自己敲是 `768M  0`。两个都对。
+现在需要空间，又不能重启数据库的情况下，思考如何清理这部分数据呢。
 
-注满这块盘的是两个文件：慢日志 363M、filler 273M（真实场景里后者是 binlog 暴涨 / 大事务 / 磁盘临时表）。
+解决步骤：
 
-### 现象 2：单条 INSERT 能成功，批量插入和建表立刻失败
-
-> 每条 `mysql` 命令前面都会多打印一行 `mysql: [Warning] Using a password on the command line
-> interface can be insecure.` —— 那是"命令行里带密码"的提示，不是错误，忽略它。
-
-```bash
-# 单行：成功，屏幕上一片空白（非交互模式下 mysql 不打印 Query OK）
-$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
-    -e "INSERT INTO t_big(pad) VALUES (REPEAT('y',1100)); SELECT ROW_COUNT() AS affected_rows;"
-affected_rows
-1
-
-# 批量 5000 行：要扩 .ibd，失败
-$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
-    -e "INSERT INTO t_big(pad) SELECT REPEAT('y',1100) FROM information_schema.columns LIMIT 5000"
-ERROR 1114 (HY000) at line 1: The table 't_big' is full
-
-# 建表：失败，但报的是另一个错号
-$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass demo \
-    -e "CREATE TABLE t_new (id INT) ENGINE=InnoDB"
-ERROR 3675 (HY000) at line 1: Create table/tablespace 't_new' failed, as disk is full
 ```
-
-单行能成功，是因为已有数据页里还有空隙，塞得下；批量插入要扩 extent、建表要写新的 `.ibd`，一扩就撞墙。**所以「能不能插一条」永远不能用来判断盘满。**
-
-### 现象 3：删掉慢日志，`df` 一点没降
-
-```bash
-$ docker exec -it dfl-05-disk-full rm -f /var/lib/mysql/slow.log
-$ docker exec -it dfl-05-disk-full sh -c 'df -h /var/lib/mysql; du -sh /var/lib/mysql'
-tmpfs           768M  768M     0 100% /var/lib/mysql     ← 一点没降
-406M	/var/lib/mysql                                   ← 掉了 362M
-```
-
-删除确实生效了（`ls` 看不到文件了），空间却没回来。这就是整个实验的核心。
-
-### 现象 4：服务端日志只有一条，慢日志还是 ON
-
-```bash
-$ docker logs dfl-05-disk-full 2>&1 | grep -E 'errno: 28|MY-010907' | tail -3
-[ERROR] [MY-010907] [Server] Error writing file '/var/lib/mysql/slow.log' (errno: 28 - No space left on device)
-
-$ docker exec -it dfl-05-disk-full mysql -uroot -prootpass -e "SHOW VARIABLES LIKE 'slow_query_log'"
-Variable_name	Value
-slow_query_log	ON
-```
-
-**8.0.46 和 8.4.11 都不会因为写失败自己关慢日志**，只报一条就继续跑。所以那个 fd 会一直挂着，盘满之后句柄不会自己消失。
-
-### 现象 5：谁还开着这个文件
-
-```bash
-# 错误写法：默认是 root，读不到 mysqld 的 fd
-$ docker exec -it dfl-05-disk-full ls -l /proc/1/fd | grep 'slow\.log'
-ls: cannot open directory '/proc/1/fd': Permission denied
-
-# 正确写法：以 mysqld 自己的身份去看
-$ docker exec -u mysql -it dfl-05-disk-full ls -l /proc/1/fd | grep 'slow\.log'
-l-wx------. 1 mysql mysql 64 Nov 19 15:53 36 -> /var/lib/mysql/slow.log (deleted)
-```
-
-`(deleted)` 是关键。顺手还会看到几条 `/tmp/#NNN (deleted)`，那是 InnoDB 的临时文件，一直在、也很小，不是嫌疑对象。
-
----
-
-## 二、思考方向
-
-### 1. 先把「占用」分成三类
-
-盘满的时候不是所有空间都能立刻要回来，先分类再动手：
-
-| 类型 | 例子 | 怎么处理 |
-|---|---|---|
-| MySQL 能自己回收 | purge 过的 binlog、旧的 relay log | `PURGE BINARY LOGS`，不要 `rm` 文件（索引会不一致） |
-| 只能删文件 | 慢日志、错误日志、旧备份、core dump | `rm`，但**要看有没有进程开着** |
-| `rm` 也没用 | 被进程持有的已删除文件 | 关掉持有者（本实验就是这一类） |
-
-第三类是这个故障的全部难点：`rm` 之后 `df` 不动，人会以为"删错了"或"文件系统坏了"。
-
-### 2. 删除 ≠ 关闭：两个引用计数
-
-Linux 回收一个文件的数据块，要**同时**满足两个条件：
-
-- `i_nlink == 0`：没有目录项指向这个 inode（`rm` 干的事）
-- `refcount == 0`：没有进程持有它的 fd（`close` 干的事）
-
-`rm` 之后 `nlink` 立刻归零，但 mysqld 的 fd 还开着，`refcount` 还是 1，条件缺一，一个块都不回收。
-
-### 3. `df` 和 `du` 统计的不是一件事
-
-- `df` 读文件系统元数据，统计**已分配的块** → 被删但被占用的块还算在内
-- `du` 遍历目录树，统计**能看到的文件** → 那个文件已经没有路径了，看不到
-
-所以两个数一旦对不上，只有一个解释：**有进程持着已删除的 inode**。这不是文件系统的锅。
-
-### 4. 思考误区
-
-- **去怀疑文件系统。** 查 `mount`、`dumpe2fs`，怀疑 loop 设备、怀疑挂载丢了 —— 全错。岔路口是同时看 `df` 和 `du`。
-- **用单行 INSERT 判断盘满。** 返回成功，一度以为盘已经好了，直到批量插入报 `ERROR 1114` 才发现被骗。
-- **`grep -i slow` 把自己骗了。** 想确认句柄没了，`grep -i slow` 却输出一整屏 fd，匹配到的是**路径名** `/mnt/labdisk/`。要写 `grep 'slow\.log'` 并看有没有 `(deleted)`；重开慢日志会有一个**新的** fd 指向真实文件，那是正常的。
-- **`/proc/1/fd` 权限不足，看起来像"没有句柄"。** root 读 mysqld 的 fd 被拒，输出 `Permission denied`；顺手再加 `2>/dev/null` 就变成什么都没有 —— 和"确实没有"在输出上一模一样。必须 `-u mysql`。
-
-### 5. 为什么不能重启
-
-重启要写盘的地方太多了：新建 binlog、InnoDB 打开 redo、`ibtmp1`/`tmpdir`、pid 文件，还有 crash recovery 自己的临时文件。盘满时这些全部可能失败，**初始化阶段就退出，实例起不来**。而且 `shutdown` 本身也可能卡住。
-
-所以处置方向从一开始就该是「不重启，把句柄关掉」，而不是「重启一下试试」。
-
----
-
-## 三、解决方法
-
-### 1. 处置顺序（全程不重启）
-
-```bash
 # ① 先确认是真的盘满：df 和 du 一起看，两个数对不上就去 /proc 找 (deleted)
 $ df -h /var/lib/mysql; du -sh /var/lib/mysql
 
@@ -183,33 +119,17 @@ $ : > /var/lib/mysql/slow.log                                   # truncate，救
 # ④ 验证空间真的回来了，而且实例没重启
 $ df -h /var/lib/mysql
 $ mysql -uroot -p -e "SHOW GLOBAL STATUS LIKE 'Uptime'"         # 单调增长 = 没重启
-
-# ⑤ 腾出空间之后再扩盘，别把扩盘当第一动作
 ```
 
-### 2. 三种删日志方式的差别（只有一种是对的）
-
-| 做法 | 空间立即释放 | 说明 |
-|---|---|---|
-| `rm slow.log` | **否** | fd 还在，白删（本实验的现场） |
-| `: > slow.log` | 是 | truncate 不改 inode；紧急可用，官方不支持，可能留稀疏空洞 |
-| `mv` + `FLUSH SLOW LOGS` | 是 | **标准做法**，旧 fd 关闭、新 inode 建立，需要 `RELOAD` 权限 |
-
-本实验用的是第四种：`SET GLOBAL slow_query_log=OFF` 再 `ON`。它和 `mv`+`FLUSH` 等价（都是关 fd、开新文件），好处是不用碰文件系统。
-
-### 3. 实测：空间怎么回来的
+关闭慢日志之后记得开启
 
 ```
-关慢日志前：df 768M/100%，du 406M（删了 363M 的慢日志，du 掉了，df 没动）
-SET GLOBAL slow_query_log=OFF 之后：df 768M → 406M（363M 立刻回收）
-清掉 filler 之后：df 133M
-重开慢日志：新 slow.log 1.3K
-写入恢复：INSERT ... 3548 rows affected
+mysql -uroot -p -e "SET GLOBAL slow_query_log=ON" 
 ```
 
-全程 `Uptime` 单调增长，**没有重启**。真机（974M ext4）上数字不同、走势一样：`df` 958M/100% → `rm` 后仍是 958M、`du` 掉到 511M → 关慢日志后 511M（447M 回来）→ 清 filler 后 149M。
 
-### 4. 防复发
+
+# 总结
 
 **配置**
 
@@ -234,7 +154,7 @@ SET GLOBAL slow_query_log=OFF 之后：df 768M → 406M（363M 立刻回收）
 
 
 
-## 自己再答一遍（不看上面）
+# 问题复盘
 
 1. `df` 显示 100%，`du` 加起来只有一半。这两个数差在哪，说明什么？
 2. 删掉慢日志之后 `df` 会降吗？为什么？
